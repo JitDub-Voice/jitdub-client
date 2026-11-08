@@ -8,7 +8,7 @@ import { doc, events as docEvents, cues, tracks, byKind, canEdit, member } from 
 import * as audio from './audio.js';
 import { ui, uiEvents, select, ensureArmed, arm } from './ui.js';
 import { showAuth, showProjects } from './lobby.js';
-import { mountTimeline, deleteSelection, splitAtPlayhead, addMarker, setPps, scrollToTime, refresh as refreshTimeline } from './timeline.js';
+import { mountTimeline, deleteSelection, splitAtPlayhead, addMarker, setPps, scrollToTime, refresh as refreshTimeline, copySelection, cutSelection, pasteClipboard, duplicateSelection, selectAll, nudgeSelection, zoomToSelection } from './timeline.js';
 import { mountVideo, pickVideo, countdown } from './video.js';
 import { mountScript, pickSubs } from './script.js';
 import { mountSide } from './side.js';
@@ -626,7 +626,9 @@ function showHotkeys() {
     ['Пробел', 'Играть / стоп (во время записи — стоп)'], ['Shift+Пробел', 'Стоп с возвратом к месту старта'], ['R', 'Запись на свою дорожку с плейхеда'], ['Shift+R', 'Записать выбранную реплику (преролл, автостоп)'],
     ['↑ / ↓', 'Предыдущая / следующая реплика'], ['← / →', 'Плейхед ±1 с (Shift — ±5 с)'], ['Home / End', 'В начало / в конец'],
     ['Enter', 'Прослушать выбранную реплику'], ['P', 'Прослушать последний / выбранный дубль'], ['D', 'Оригинал под озвучкой: закадр / дубляж / как есть'], ['L', 'Повтор выбранного'], ['S', 'Разрезать клип по плейхеду'], ['M', 'Маркер'],
-    ['Delete', 'Удалить выбранное'], ['Ctrl+Z / Ctrl+Shift+Z', 'Отменить / повторить свои действия'], ['Ctrl+колесо, + / −', 'Масштаб таймлайна'],
+    ['Ctrl+C / Ctrl+X / Ctrl+V', 'Копировать / вырезать / вставить у плейхеда'], ['Ctrl+D', 'Дублировать сразу после выделенного'],
+    ['Ctrl+A', 'Выделить все клипы и реплики'], ['Alt+перетаскивание', 'Копия клипа или реплики'], ['Alt+← / →', 'Сдвиг выделенного на кадр (Shift — на 10)'],
+    ['Z', 'Показать выделенное целиком'], ['Delete', 'Удалить выбранное'], ['Ctrl+Z / Ctrl+Shift+Z', 'Отменить / повторить свои действия'], ['Ctrl+колесо, + / −', 'Масштаб таймлайна'],
     ['Shift+протяжка по линейке', 'Диапазон повтора'], ['Ctrl+E', 'Экспорт'], ['Ctrl+,', 'Настройки'],
   ];
   modal({ title: 'Горячие клавиши', width: 520, body: h('div.kbd-list', {}, rows.flatMap(([k, d]) => [h('kbd', {}, k), h('span', {}, d)])), buttons: [{ label: 'OK', primary: true }] });
@@ -655,7 +657,18 @@ addEventListener('keydown', e => {
   if (ctrl && (k === 'z' || k === 'я') && !e.shiftKey) { e.preventDefault(); sync.undo(); return; }
   if (ctrl && ((k === 'z' || k === 'я') && e.shiftKey || k === 'y' || k === 'н' || k === 'Z')) { e.preventDefault(); sync.redo(); return; }
   if (ctrl && (k === 'e' || k === 'у')) { e.preventDefault(); openExport(); return; }
+  // правка — по физическим клавишам (работает и в русской раскладке)
+  if (ctrl && !e.shiftKey) {
+    const act = { KeyC: copySelection, KeyX: cutSelection, KeyV: pasteClipboard, KeyD: duplicateSelection, KeyA: selectAll }[e.code];
+    if (act) { e.preventDefault(); act(); return; }
+  }
   if (ctrl) return;
+  // Alt+←/→ — сдвинуть выделенное на кадр (Shift — на 10 кадров)
+  if (e.altKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+    e.preventDefault();
+    nudgeSelection(e.code === 'ArrowLeft' ? -1 : 1, e.shiftKey);
+    return;
+  }
   switch (e.code) {
     case 'Space':
       e.preventDefault();
@@ -669,6 +682,7 @@ addEventListener('keydown', e => {
     case 'KeyM': e.preventDefault(); if (canEdit()) addMarker(audio.position()); break;
     case 'KeyL': e.preventDefault(); toggleLoop(); break;
     case 'KeyP': e.preventDefault(); reviewLast(); break;
+    case 'KeyZ': e.preventDefault(); zoomToSelection(); break;
     case 'KeyD': e.preventDefault(); cycleDuck(); break;
     case 'Home': e.preventDefault(); audio.seek(0); scrollToTime(0); break;
     case 'End': e.preventDefault(); { const t = audio.projectEnd(); audio.seek(t); scrollToTime(t); } break;
@@ -758,7 +772,7 @@ docEvents.on('change', () => { updateHeader(); renderStatus(); });
 docEvents.on('history', updateHeader);
 docEvents.on('status', () => { updateHeader(); renderStatus(); });
 docEvents.on('online', () => { renderOnline(); renderStatus(); });
-docEvents.on('presence', renderOnline);
+docEvents.on('presence', (o, changed) => { if (changed?.has('recording')) renderOnline(); }); // кружок «пишет» на аватарке
 docEvents.on('members', renderOnline);
 docEvents.on('error', m => toast(m, 'err'));
 docEvents.on('fatal', reason => { toast(reason, 'err', 6000); goLobby(); });

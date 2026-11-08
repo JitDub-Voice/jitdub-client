@@ -26,7 +26,13 @@ export function mountSide(inspEl, tabsEl, bodyEl) {
   });
   docEvents.on('online', () => tab === 'people' && renderBody());
   docEvents.on('members', () => tab === 'people' && renderBody());
-  docEvents.on('presence', () => tab === 'people' && renderPeopleSoft());
+  // статусы участников: запись/воспроизведение — сразу, позиция плейхеда — не чаще раза в секунду
+  let peopleTimer = null;
+  docEvents.on('presence', (o, changed) => {
+    if (tab !== 'people') return;
+    if (changed?.has('recording') || changed?.has('playing')) return renderPeopleSoft();
+    peopleTimer ||= setTimeout(() => { peopleTimer = null; renderPeopleSoft(); }, 1000);
+  });
   docEvents.on('takes', () => { renderTabs(); if (tab === 'takes') renderBody(); });
   docEvents.on('chat', m => {
     if (tab === 'chat') appendMsg(m, true);

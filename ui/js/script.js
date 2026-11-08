@@ -23,7 +23,8 @@ export function mountScript(tabsEl, bodyEl) {
   docEvents.on('state', () => { renderTabs(); render(); });
   docEvents.on('change', ch => { if (ch.kinds.has('cue') || ch.kinds.has('track')) { renderTabs(); renderList(); } });
   docEvents.on('members', render);
-  docEvents.on('presence', debounce(renderList, 150));
+  const relist = debounce(renderList, 150);
+  docEvents.on('presence', (o, changed) => { if (changed?.has('selection')) relist(); }); // аватарки «кто смотрит реплику»
   uiEvents.on('select', renderList);
   audio.events.on('tick', markNow);
   audio.events.on('seek', markNow);

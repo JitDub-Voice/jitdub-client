@@ -72,9 +72,10 @@ export function mountTimeline(root) {
   el.lanes.addEventListener('drop', onDrop);
   new ResizeObserver(() => { drawRuler(); }).observe(el.ruler);
 
-  docEvents.on('state', () => { clipEls.clear(); cueEls.clear(); fill(el.lanesInner); queue(); });
+  docEvents.on('state', () => { clipEls.clear(); cueEls.clear(); markersSig = ''; headsSig = ''; fill(el.lanesInner); queue(); });
   docEvents.on('change', () => { pruneSelection(); queue(); });
-  docEvents.on('presence', o => { renderRemote(); if ('recording' in o.presence || 'selection' in o.presence) queue(); });
+  // плейхеды других — дёшево, двигаем линии; полная перерисовка — только если сменилось выделение или запись
+  docEvents.on('presence', (o, changed) => { renderRemote(); if (changed?.has('selection') || changed?.has('recording')) queue(); });
   docEvents.on('online', () => { renderRemote(); queue(); });
   docEvents.on('members', queue);
   uiEvents.on('select', queue);
@@ -192,7 +193,19 @@ function remoteRecording() {
   return m;
 }
 
+// Шапки дорожек пересобираются, только когда меняется то, что в них видно: иначе ползунки и кнопки
+// пропадали бы из-под мыши при каждом чужом изменении.
+let headsSig = '';
 function renderHeads(recBy) {
+  const sig = JSON.stringify([
+    tracks().map(t => [t.id, t.name, t.character, t.color, t.gain, t.mute, t.solo, t.locked, t.ownerId, rowOf(t.id)?.y,
+      member(t.ownerId)?.displayName, member(t.ownerId)?.avatar, member(recBy.get(t.id))?.displayName ?? null, recBy.has(t.id)]),
+    ui.armed, tracks().filter(t => ui.sel.has(t.id)).map(t => t.id), byKind('cue').length,
+  ]);
+  if (sig === headsSig && el.headsInner.childElementCount) return;
+  // ползунок громкости тянут прямо сейчас — не трогаем, перерисуемся после отпускания
+  if (el.headsInner.contains(document.activeElement) && document.activeElement.type === 'range') return;
+  headsSig = sig;
   const kids = [];
   kids.push(h('div.thead.cueh', { style: { top: 0, height: CUE_H + 'px', '--tc': '#6F737A' } },
     h('div.cbar'),
@@ -234,6 +247,9 @@ function renderLanes(recBy) {
   // фоны строк держим первыми детьми, клипы/реплики — поверх (по ключам)
   let bg = el.lanesInner.querySelector(':scope > .lanes-bg');
   if (!bg) { bg = h('div.lanes-bg'); el.lanesInner.prepend(bg); }
+  const sig = JSON.stringify([rows.map(r => [r.id, r.y, r.h]), ui.armed]);
+  if (bg.dataset.sig === sig) { if (!el.playhead.isConnected) el.lanesInner.append(el.playhead, el.snapline, el.loop); return; }
+  bg.dataset.sig = sig;
   fill(bg, rows.map(r => h(`div.lane${r.kind === 'cues' ? '.cue-lane' : ''}${r.id === ui.armed ? '.armed' : ''}`, {
     style: { top: r.y + 'px', height: r.h + 'px' }, dataset: { row: r.id },
   })));
@@ -316,6 +332,9 @@ function drawWave(e, c, data, w, color) {
 }
 
 function drawFades(e, c, w) {
+  const sig = `${c.fadeIn}|${c.fadeOut}|${w}`;
+  if (e.dataset.fades === sig) return;
+  e.dataset.fades = sig;
   e.querySelectorAll('.fade').forEach(f => f.remove());
   const mk = (left, width, dir) => h('div.fade', {
     style: { left: left + 'px', width: width + 'px' },
@@ -358,10 +377,19 @@ function placeCue(e, q) {
   e.style.outline = lc ? `2px solid ${lc}` : '';
   const ass = member(q.assigneeId);
   e.title = `${q.character ? q.character + ': ' : ''}${q.text}\n${fmtTime(q.start)} – ${fmtTime(q.end)}${ass ? '\nозвучивает: ' + ass.displayName : ''}`;
-  fill(e, q.character ? h('b', {}, q.character) : null, q.text, h('div.eh.l', { dataset: { edge: 'l' } }), h('div.eh.r', { dataset: { edge: 'r' } }));
+  // содержимое пересобираем только при смене текста — иначе двойной клик «терялся» между перерисовками
+  const sig = `${q.character}|${q.text}`;
+  if (e.dataset.sig !== sig) {
+    e.dataset.sig = sig;
+    fill(e, q.character ? h('b', {}, q.character) : null, q.text, h('div.eh.l', { dataset: { edge: 'l' } }), h('div.eh.r', { dataset: { edge: 'r' } }));
+  }
 }
 
+let markersSig = '';
 function renderMarkers() {
+  const sig = JSON.stringify([pps, byKind('marker').map(m => [m.time, m.color, m.label])]);
+  if (sig === markersSig && el.lanesInner.querySelector(':scope > .marker, :scope > .lanes-bg')) return;
+  markersSig = sig;
   el.lanesInner.querySelectorAll(':scope > .marker').forEach(m => m.remove());
   for (const m of byKind('marker')) el.lanesInner.append(h('div.marker', { style: { left: m.time * pps + 'px', '--mc': m.color || '#F2C55C' }, title: m.label }));
 }
@@ -556,6 +584,7 @@ function marquee(e, t0, y0) {
 function startMove(e, t0, y0) {
   const items = [...ui.sel].map(id => doc.items.get(id)).filter(it => it && (it.kind === 'clip' || it.kind === 'cue'));
   if (!items.length) return;
+  const copyMode = e.altKey; // Alt+перетаскивание — копия, оригинал остаётся
   const ids = new Set(items.map(i => i.id));
   const orig = new Map(items.map(i => [i.id, { ...i }]));
   const trackList = tracks();
@@ -595,21 +624,141 @@ function startMove(e, t0, y0) {
     drag = null;
     if (!moved) return;
     const ops = [];
+    const newIds = [];
     for (const it of items) {
       const o = orig.get(it.id);
+      let data;
       if (it.kind === 'clip') {
         const ti = clamp(trackList.findIndex(x => x.id === o.trackId) + dRow, 0, trackList.length - 1);
-        ops.push({ type: 'update', id: it.id, data: { start: round(o.start + dt), trackId: trackList[ti].id } });
+        data = { start: round(o.start + dt), trackId: trackList[ti].id };
       } else {
-        ops.push({ type: 'update', id: it.id, data: { start: round(o.start + dt), end: round(o.end + dt) } });
+        data = { start: round(o.start + dt), end: round(o.end + dt) };
+      }
+      if (copyMode) {
+        const { id, kind, ...rest } = o;
+        const nid = uid(kind === 'clip' ? 'k' : 'q');
+        newIds.push(nid);
+        ops.push({ type: 'add', kind, id: nid, data: { ...rest, ...data } });
+      } else {
+        ops.push({ type: 'update', id: it.id, data });
       }
     }
-    batch(ops, { label: 'перемещение' });
+    if (copyMode) { for (const it of items) placeItem(orig.get(it.id)); }
+    batch(ops, { label: copyMode ? 'копия' : 'перемещение' });
+    if (copyMode) select(newIds);
   };
   addEventListener('pointermove', move); addEventListener('pointerup', up);
 }
 
 const round = v => Math.round(v * 1000) / 1000;
+
+function placeItem(it) {
+  if (it.kind === 'clip') {
+    const tr = tracks().find(x => x.id === it.trackId);
+    const e = clipEls.get(it.id), r = rowOf(it.trackId);
+    if (e && r) placeClip(e, it, r.y, tr);
+  } else if (it.kind === 'cue') {
+    const e = cueEls.get(it.id);
+    if (e) placeCue(e, it);
+  }
+}
+
+// ---------- буфер обмена и правка с клавиатуры ----------
+// Ctrl+C / Ctrl+X / Ctrl+V / Ctrl+D, Ctrl+A, Alt+←/→ — сдвиг на кадр. Буфер общий для проектов этого компьютера.
+const editable = () => [...ui.sel].map(id => doc.items.get(id)).filter(it => it && (it.kind === 'clip' || it.kind === 'cue' || it.kind === 'marker'));
+const startOf = it => (it.kind === 'marker' ? it.time : it.start);
+const endOf = it => (it.kind === 'clip' ? it.start + it.duration : it.kind === 'cue' ? it.end : it.time);
+
+export function copySelection({ silent = false } = {}) {
+  const items = editable();
+  if (!items.length) { if (!silent) toast('Выберите клипы или реплики', 'info', 1500); return false; }
+  const base = Math.min(...items.map(startOf));
+  const clip = { base, span: Math.max(...items.map(endOf)) - base, items: items.map(({ id, ...rest }) => structuredClone(rest)) };
+  prefs.set('clipboard', clip);
+  if (!silent) toast(`Скопировано: ${items.length}`, 'info', 1200);
+  return true;
+}
+
+export function cutSelection() {
+  if (!canEdit() || !copySelection({ silent: true })) return;
+  batch(editable().map(it => ({ type: 'remove', id: it.id })), { label: 'вырезать' });
+  select([]);
+}
+
+// вставка с позиции at: клипы одной дорожки — на дорожку записи (последнюю, по которой кликнули), иначе на свои
+function pasteItems(clip, at) {
+  if (!canEdit() || !clip?.items?.length) return [];
+  const all = tracks();
+  const clipTracks = new Set(clip.items.filter(i => i.kind === 'clip').map(i => i.trackId));
+  const oneTrack = clipTracks.size === 1;
+  const ops = [], ids = [];
+  for (const it of clip.items) {
+    const d = at - clip.base;
+    const id = uid(it.kind === 'clip' ? 'k' : it.kind === 'cue' ? 'q' : 'm');
+    const { kind, ...rest } = it;
+    const data = { ...rest };
+    if (kind === 'clip') {
+      data.start = round(Math.max(0, it.start + d));
+      if (oneTrack && ui.armed) data.trackId = ui.armed;
+      if (!all.some(t => t.id === data.trackId)) data.trackId = ui.armed || all[0]?.id;
+      if (!data.trackId) continue;
+    } else if (kind === 'cue') {
+      data.start = round(Math.max(0, it.start + d)); data.end = round(Math.max(0.05, it.end + d)); data.status = 'todo';
+    } else if (kind === 'marker') {
+      data.time = round(Math.max(0, it.time + d));
+    }
+    ops.push({ type: 'add', kind, id, data });
+    ids.push(id);
+  }
+  batch(ops, { label: 'вставка' });
+  select(ids);
+  return ids;
+}
+
+export function pasteClipboard() {
+  const clip = prefs.get('clipboard', null);
+  if (!clip?.items?.length) { toast('Буфер пуст — сначала Ctrl+C', 'info', 1500); return; }
+  pasteItems(clip, audio.position());
+}
+
+// Ctrl+D — копия сразу после выделенного
+export function duplicateSelection() {
+  const items = editable();
+  if (!items.length) return;
+  const base = Math.min(...items.map(startOf));
+  const end = Math.max(...items.map(endOf));
+  pasteItems({ base, items: items.map(({ id, ...rest }) => structuredClone(rest)) }, end);
+}
+
+export function selectAll() {
+  select(byKind('clip').concat(byKind('cue')).map(i => i.id));
+}
+
+// сдвиг выделенного: шаг — кадр видео (fps проекта, иначе 1/25 с)
+export function nudgeSelection(dir, big = false) {
+  const items = editable();
+  if (!items.length || !canEdit()) return false;
+  const frame = 1 / (doc.project?.video?.fps || 25);
+  let d = dir * (big ? 10 * frame : frame);
+  const minS = Math.min(...items.map(startOf));
+  if (minS + d < 0) d = -minS;
+  batch(items.map(it => ({
+    type: 'update', id: it.id,
+    data: it.kind === 'clip' ? { start: round(it.start + d) } : it.kind === 'cue' ? { start: round(it.start + d), end: round(it.end + d) } : { time: round(it.time + d) },
+  })), { label: 'сдвиг' });
+  return true;
+}
+
+// Z — показать выделенное целиком (или весь проект, если ничего не выбрано)
+export function zoomToSelection() {
+  const items = editable();
+  if (!items.length) return fitAll();
+  const a = Math.min(...items.map(startOf)), b = Math.max(...items.map(endOf));
+  const w = el.lanes.clientWidth;
+  setPps((w * 0.8) / Math.max(0.5, b - a), a);
+  el.lanes.scrollLeft = Math.max(0, a * pps - w * 0.1);
+  queue();
+}
 
 // при перетаскивании плейхед (а с ним кадр видео) встаёт туда, где край, и звучит кусочек под ним
 function follow(t, opts) {
@@ -694,6 +843,7 @@ function onLanesMenu(e) {
     { label: 'Перейти сюда', icon: 'right', onClick: () => audio.seek(t) },
     { label: 'Добавить реплику здесь', icon: 'add', disabled: !canEdit(), onClick: () => addCueAt(t) },
     { label: 'Маркер здесь', icon: 'add', disabled: !canEdit(), sc: 'M', onClick: () => addMarker(t) },
+    { label: 'Вставить сюда', icon: 'copy', sc: 'Ctrl+V', disabled: !canEdit() || !prefs.get('clipboard', null), onClick: () => { const clip = prefs.get('clipboard', null); if (row?.kind === 'track') arm(row.id); pasteItems(clip, t); } },
     row?.kind === 'track' ? '-' : null,
     row?.kind === 'track' ? { label: 'Писать на эту дорожку', icon: 'mic', onClick: () => arm(row.id) } : null,
   ]);
@@ -710,6 +860,10 @@ function clipMenu(c, x, y) {
     { label: c.mute ? 'Включить клип' : 'Заглушить клип', icon: c.mute ? 'show' : 'hide', disabled: !canEdit(), onClick: () => update(c.id, { mute: !c.mute }) },
     { label: 'Перейти к началу клипа', icon: 'left', onClick: () => audio.seek(c.start) },
     '-',
+    { label: 'Копировать', icon: 'copy', sc: 'Ctrl+C', onClick: () => copySelection() },
+    { label: 'Вырезать', sc: 'Ctrl+X', disabled: !canEdit(), onClick: cutSelection },
+    { label: 'Дублировать', sc: 'Ctrl+D', disabled: !canEdit(), onClick: duplicateSelection },
+    '-',
     { label: n > 1 ? `Удалить (${n})` : 'Удалить', icon: 'delete', sc: 'Del', danger: true, disabled: !canEdit(), onClick: deleteSelection },
   ]);
 }
@@ -721,6 +875,8 @@ function cueMenu(q, x, y) {
     { label: 'Прослушать', icon: 'play', onClick: () => { audio.setLoop(null); audio.seek(Math.max(0, q.start - 0.5)); audio.play(); } },
     { label: 'Изменить текст', icon: 'edit', disabled: !canEdit(), onClick: () => editCueText(q) },
     '-', st('todo'), st('recorded'), st('approved'), st('redo'), '-',
+    { label: 'Копировать', icon: 'copy', sc: 'Ctrl+C', onClick: () => copySelection() },
+    { label: 'Дублировать', sc: 'Ctrl+D', disabled: !canEdit(), onClick: duplicateSelection },
     { label: 'Удалить', icon: 'delete', sc: 'Del', danger: true, disabled: !canEdit(), onClick: deleteSelection },
   ]);
 }

@@ -178,6 +178,8 @@ function onMessage(m) {
       for (const p of pending) { applyOp(p.op, newChanged()); p.sent = send({ t: 'op', op: p.op, cid: p.cid }); }
       clearInterval(pingTimer);
       pingTimer = setInterval(() => send({ t: 'ping' }), 20000);
+      sentPresence = {};
+      flushPresence();
       setStatus('online');
       events.emit('state');
       break;
@@ -204,9 +206,12 @@ function onMessage(m) {
     case 'presence': {
       const o = doc.online.get(m.sid) || { sid: m.sid, userId: m.userId, presence: {} };
       const { t, sid, userId, ...p } = m;
+      // какие поля реально изменились: слушатели перерисовывают только то, что от них зависит
+      const changed = new Set();
+      for (const [k, v] of Object.entries(p)) if (JSON.stringify(o.presence[k]) !== JSON.stringify(v)) changed.add(k);
       Object.assign(o.presence, p);
       doc.online.set(m.sid, o);
-      events.emit('presence', o);
+      if (changed.size) events.emit('presence', o, changed);
       break;
     }
     case 'joined':
@@ -315,11 +320,19 @@ export function redo() {
 
 export const history = () => ({ undo: undoStack.length, redo: redoStack.length });
 
-const sendPresence = throttle(p => send({ t: 'presence', ...p }), 70);
+// присутствие: на сервер уходят только изменившиеся поля (плейхед во время воспроизведения — да,
+// выделение и запись — лишь когда меняются), не чаще ~14 раз в секунду
 let myPresence = {};
+let sentPresence = {};
+const flushPresence = throttle(() => {
+  const diff = {};
+  for (const [k, v] of Object.entries(myPresence)) if (JSON.stringify(sentPresence[k]) !== JSON.stringify(v)) diff[k] = v;
+  if (!Object.keys(diff).length) return;
+  if (send({ t: 'presence', ...diff })) sentPresence = { ...sentPresence, ...diff };
+}, 70);
 export function presence(p) {
   myPresence = { ...myPresence, ...p };
-  sendPresence(myPresence);
+  flushPresence();
 }
 
 export function chat(text) {
