@@ -7,6 +7,7 @@ import { doc, events as docEvents, cues, op, canEdit } from './sync.js';
 import * as audio from './audio.js';
 import { prefs, isTauri, api, session } from './api.js';
 import { toast, menu } from './kit.js';
+import { loadMedia, clearMedia } from './media.js';
 
 let el = {};
 let file = null;   // { name, size, path? , remote? }
@@ -93,6 +94,7 @@ async function autoOpen() {
   const id = doc.project?.id;
   if (!id || id === shownProject) return;
   shownProject = id;
+  clearMedia();
   if (file) { el.video.removeAttribute('src'); el.video.load(); file = null; if (url) { URL.revokeObjectURL(url); url = null; } }
   render();
   const saved = prefs.get('video.' + id, null);
@@ -218,6 +220,7 @@ function onMeta() {
     toast(`Это видео отличается от проектного (${v.name}, ${fmtBytes(v.size || 0)}). Тайминги реплик могут не совпасть.`, 'warn', 7000);
   }
   el.video.currentTime = audio.position();
+  loadMedia(el.video.currentSrc || el.video.src, `${file.name}|${file.size}`, el.video.duration, file.size || 0);
   audio.attachOriginal(); // звук оригинала — через движок: громкость, закадр/дубляж под озвучкой
   render();
   docEvents.emit('videoLoaded');

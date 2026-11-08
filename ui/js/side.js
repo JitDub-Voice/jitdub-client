@@ -30,6 +30,7 @@ export function mountSide(inspEl, tabsEl, bodyEl) {
   let peopleTimer = null;
   docEvents.on('presence', (o, changed) => {
     if (tab !== 'people') return;
+    if (changed && [...changed].every(k => k === 'cursor')) return;
     if (changed?.has('recording') || changed?.has('playing')) return renderPeopleSoft();
     peopleTimer ||= setTimeout(() => { peopleTimer = null; renderPeopleSoft(); }, 1000);
   });
@@ -83,6 +84,7 @@ function renderInspector() {
   }
   if (items.length > 1) {
     const kinds = new Set(items.map(i => i.kind));
+    if (kinds.size === 1 && kinds.has('clip')) return multiClipInspector(items);
     fill(el.insp, h('div.ih', {}, `Выбрано: ${items.length}`), h('div.acts', {},
       kinds.has('cue') && kinds.size === 1 ? statusButtons(items) : null,
       h('button.ui-btn.secondary', { disabled: !canEdit() || kinds.has('track'), onclick: () => { batch(items.map(i => ({ type: 'remove', id: i.id }))); select([]); } }, icon('delete'), 'Удалить')));
@@ -154,6 +156,45 @@ function clipInspector(c) {
     h('div.acts', {},
       h('button.ui-btn.secondary', { disabled: !canEdit(), onclick: () => update(c.id, { mute: !c.mute }) }, icon(c.mute ? 'show' : 'hide'), c.mute ? 'Включить' : 'Заглушить'),
       h('button.ui-btn.secondary', { disabled: !canEdit(), onclick: () => { batch([{ type: 'remove', id: c.id }]); select([]); } }, icon('delete'), 'Удалить')));
+}
+
+// несколько клипов: общая громкость (относительно — сохраняет разницу между клипами), фейды, mute
+function multiClipInspector(items) {
+  const n = items.length;
+  const same = (key, def = 0) => { const v = items.map(c => c[key] ?? def); return v.every(x => Math.abs(x - v[0]) < 1e-6) ? v[0] : null; };
+  const g0 = same('gain', 1);
+  const gainR = h('input', { type: 'range', min: -30, max: 12, step: 0.5, value: g0 != null ? gainToDb(g0) : 0, disabled: !canEdit() });
+  const gainL = h('span.dim', { style: { width: '64px', textAlign: 'right', fontSize: '12px' } }, g0 != null ? `${gainToDb(g0).toFixed(1)} дБ` : 'разная');
+  // при разной громкости ползунок — сдвиг в дБ ко всем
+  const rel = g0 == null;
+  gainR.addEventListener('input', () => { gainL.textContent = `${rel && +gainR.value > 0 ? '+' : ''}${(+gainR.value).toFixed(1)} дБ`; });
+  gainR.addEventListener('change', () => {
+    const db = +gainR.value;
+    batch(items.map(c => ({ type: 'update', id: c.id, data: { gain: Math.round(Math.min(4, rel ? (c.gain ?? 1) * dbToGain(db) : dbToGain(db)) * 1000) / 1000 } })), { label: 'громкость клипов' });
+  });
+  gainR.addEventListener('dblclick', () => batch(items.map(c => ({ type: 'update', id: c.id, data: { gain: 1 } }))));
+  const num = key => {
+    const v = same(key);
+    const i = h('input', { type: 'number', min: 0, step: 0.05, value: v != null ? v.toFixed(2) : '', placeholder: 'разные', disabled: !canEdit() });
+    i.addEventListener('change', () => {
+      if (i.value === '') return;
+      const x = Math.max(0, +i.value || 0);
+      batch(items.map(c => ({ type: 'update', id: c.id, data: { [key]: Math.round(Math.min(c.duration / 2, x) * 1000) / 1000 } })), { label: 'фейды клипов' });
+    });
+    return i;
+  };
+  const allMuted = items.every(c => c.mute);
+  const total = items.reduce((s, c) => s + c.duration, 0);
+  fill(el.insp,
+    h('div.ih', {}, `Клипы: ${n}`, h('span.dim', {}, `${total.toFixed(1)} с всего`)),
+    field('Громкость', [gainR, gainL]),
+    rel ? h('div.dim', { style: { fontSize: '11px', margin: '-2px 0 4px' } }, 'Громкость у клипов разная — ползунок прибавит или убавит всем одинаково') : null,
+    field('Фейд вход', [num('fadeIn'), h('span.dim', {}, 'с')]),
+    field('Фейд выход', [num('fadeOut'), h('span.dim', {}, 'с')]),
+    h('div.acts', {},
+      h('button.ui-btn.secondary', { disabled: !canEdit(), onclick: () => batch(items.map(c => ({ type: 'update', id: c.id, data: { mute: !allMuted } }))) }, icon(allMuted ? 'show' : 'hide'), allMuted ? 'Включить' : 'Заглушить'),
+      h('button.ui-btn.secondary', { disabled: !canEdit(), onclick: () => batch(items.map(c => ({ type: 'update', id: c.id, data: { fadeIn: 0, fadeOut: 0, gain: 1 } })), { label: 'сброс клипов' }) }, icon('refresh'), 'Сбросить'),
+      h('button.ui-btn.secondary', { disabled: !canEdit(), onclick: () => { batch(items.map(i => ({ type: 'remove', id: i.id }))); select([]); } }, icon('delete'), 'Удалить')));
 }
 
 const SWATCHES = ['#3574F0', '#5FAD65', '#E08855', '#955AE0', '#24A394', '#DB5C5C', '#F2C55C', '#E06AA8', '#4FB3D9', '#A3C44E'];

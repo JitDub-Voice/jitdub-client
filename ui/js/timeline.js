@@ -7,8 +7,12 @@ import * as audio from './audio.js';
 import { ui, uiEvents, select, arm, ensureArmed, setSnap, setFollow, pruneSelection } from './ui.js';
 import { menu, prompt, toast } from './kit.js';
 import { prefs } from './api.js';
+import { media, events as mediaEvents, thumbAt } from './media.js';
 
 const CUE_H = 38;
+const VID_H = 44;
+const ORIG_H = 48;
+const CLIP_TOP = 14; // высота полосы с названием клипа
 const TRACK_H = 68;
 const HEAD_W = 220;
 const TRACK_COLORS = ['#3574F0', '#5FAD65', '#E08855', '#955AE0', '#24A394', '#DB5C5C', '#F2C55C', '#E06AA8', '#4FB3D9', '#A3C44E'];
@@ -18,6 +22,7 @@ let pps = prefs.get('pps', 60); // пикселей на секунду
 const clipEls = new Map();
 const cueEls = new Map();
 const remoteEls = new Map(); // sid → { line, flag }
+const cursorEls = new Map(); // sid → курсор участника на таймлайне
 let rows = [];               // [{ kind: 'cues'|'track', id, y, h }]
 let renderQueued = false;
 let drag = null;
@@ -66,17 +71,28 @@ export function mountTimeline(root) {
   el.heads.addEventListener('wheel', e => { el.lanes.scrollTop += e.deltaY; e.preventDefault(); }, { passive: false });
   el.ruler.addEventListener('pointerdown', onRulerDown);
   el.lanes.addEventListener('pointerdown', onLanesDown);
+  // свой курсор — другим участникам (в координатах таймлайна: время + строка, не пиксели — у всех свой зум)
+  el.lanes.addEventListener('pointermove', e => {
+    const r = el.lanesInner.getBoundingClientRect();
+    const y = e.clientY - r.top;
+    const row = rowAt(y);
+    const t = +timeAtClient(e.clientX).toFixed(3);
+    // ниже последней дорожки — тоже показываем (доля от 600 px под ней)
+    if (!row) { const last = rows[rows.length - 1]; return presence({ cursor: { t, r: '__end', f: +clamp((y - (last ? last.y + last.h : 0)) / 600, 0, 1).toFixed(3) } }); }
+    presence({ cursor: { t, r: row.id, f: +((y - row.y) / row.h).toFixed(4) } });
+  });
+  el.lanes.addEventListener('pointerleave', () => presence({ cursor: null }));
   el.lanes.addEventListener('dblclick', onLanesDbl);
   el.lanes.addEventListener('contextmenu', onLanesMenu);
   el.lanes.addEventListener('dragover', onDragOver);
   el.lanes.addEventListener('drop', onDrop);
   new ResizeObserver(() => { drawRuler(); }).observe(el.ruler);
 
-  docEvents.on('state', () => { clipEls.clear(); cueEls.clear(); markersSig = ''; headsSig = ''; fill(el.lanesInner); queue(); });
+  docEvents.on('state', () => { clipEls.clear(); cueEls.clear(); cursorEls.clear(); markersSig = ''; headsSig = ''; fill(el.lanesInner); queue(); });
   docEvents.on('change', () => { pruneSelection(); queue(); });
   // плейхеды других — дёшево, двигаем линии; полная перерисовка — только если сменилось выделение или запись
-  docEvents.on('presence', (o, changed) => { renderRemote(); if (changed?.has('selection') || changed?.has('recording')) queue(); });
-  docEvents.on('online', () => { renderRemote(); queue(); });
+  docEvents.on('presence', (o, changed) => { if (changed?.has('cursor')) renderCursors(); if (changed && [...changed].every(k => k === 'cursor')) return; renderRemote(); if (changed?.has('selection') || changed?.has('recording')) queue(); });
+  docEvents.on('online', () => { renderRemote(); renderCursors(); queue(); });
   docEvents.on('members', queue);
   uiEvents.on('select', queue);
   uiEvents.on('arm', queue);
@@ -86,6 +102,8 @@ export function mountTimeline(root) {
   audio.events.on('seek', onTick);
   audio.events.on('transport', () => { followPaused = false; onTick(audio.position()); renderLoop(); });
   audio.events.on('record', queue);
+  audio.events.on('original', () => { headsSig = ''; queue(); });
+  mediaEvents.on('change', () => { headsSig = ''; queue(); });
   syncButtons();
 }
 
@@ -138,13 +156,19 @@ function onWheel(e) {
 
 // ---------- раскладка и отрисовка ----------
 function layout() {
-  rows = [{ kind: 'cues', id: '__cues', y: 0, h: CUE_H }];
-  let y = CUE_H;
+  rows = [];
+  let y = 0;
+  if (media.key) {
+    rows.push({ kind: 'video', id: '__video', y, h: VID_H }); y += VID_H;
+    rows.push({ kind: 'orig', id: '__orig', y, h: ORIG_H }); y += ORIG_H;
+  }
+  rows.push({ kind: 'cues', id: '__cues', y, h: CUE_H }); y += CUE_H;
   for (const t of tracks()) { rows.push({ kind: 'track', id: t.id, y, h: TRACK_H }); y += TRACK_H; }
   return y;
 }
 
 const rowOf = id => rows.find(r => r.id === id);
+const cueY = () => rowOf('__cues')?.y ?? 0;
 const rowAt = y => rows.find(r => y >= r.y && y < r.y + r.h) || null;
 
 let afterRender = [];
@@ -177,6 +201,7 @@ function render() {
   renderCues();
   renderMarkers();
   renderRemote();
+  renderCursors();
   renderLoop();
   onTick(audio.position());
   drawRuler();
@@ -201,13 +226,34 @@ function renderHeads(recBy) {
     tracks().map(t => [t.id, t.name, t.character, t.color, t.gain, t.mute, t.solo, t.locked, t.ownerId, rowOf(t.id)?.y,
       member(t.ownerId)?.displayName, member(t.ownerId)?.avatar, member(recBy.get(t.id))?.displayName ?? null, recBy.has(t.id)]),
     ui.armed, tracks().filter(t => ui.sel.has(t.id)).map(t => t.id), byKind('cue').length,
+    media.key, media.audioState, prefs.get('origMuted', false), prefs.get('origVolume', 0.8),
   ]);
   if (sig === headsSig && el.headsInner.childElementCount) return;
   // ползунок громкости тянут прямо сейчас — не трогаем, перерисуемся после отпускания
   if (el.headsInner.contains(document.activeElement) && document.activeElement.type === 'range') return;
   headsSig = sig;
   const kids = [];
-  kids.push(h('div.thead.cueh', { style: { top: 0, height: CUE_H + 'px', '--tc': '#6F737A' } },
+  if (media.key) {
+    const vr = rowOf('__video'), orr = rowOf('__orig');
+    kids.push(h('div.thead.media', { style: { top: vr.y + 'px', height: vr.h + 'px' } },
+      h('div.cbar'),
+      h('div.in', {}, h('div.r1', {}, icon('film'), h('span.nm', {}, 'Видео'), h('span.dim', { style: { fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, (media.key || '').split('|')[0])))));
+    const om = prefs.get('origMuted', false);
+    const ov = prefs.get('origVolume', 0.8);
+    const vol = h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: ov, 'data-tip': 'Громкость оригинала' });
+    const db = h('span.db', {}, gainToDb(ov).toFixed(1));
+    vol.addEventListener('input', () => { db.textContent = gainToDb(+vol.value).toFixed(1); audio.setOrigVolume(+vol.value); });
+    vol.addEventListener('dblclick', () => { vol.value = 0.8; audio.setOrigVolume(0.8); headsSig = ''; queue(); });
+    kids.push(h('div.thead.media', { style: { top: orr.y + 'px', height: orr.h + 'px' } },
+      h('div.cbar'),
+      h('div.in', {},
+        h('div.r1', {}, icon('headphones'), h('span.nm', {}, 'Звук оригинала'),
+          h('span.dim', { style: { fontSize: '11px' } }, media.audioState === 'loading' ? 'разбираю…' : media.audioState === 'none' ? 'волна недоступна' : '')),
+        h('div.r2', {},
+          h(`button.tbtn-s.m${om ? '.on' : ''}`, { 'data-tip': 'Заглушить оригинал', onclick: () => audio.setOrigMuted(!om) }, 'M'),
+          vol, db))));
+  }
+  kids.push(h('div.thead.cueh', { style: { top: cueY() + 'px', height: CUE_H + 'px', '--tc': '#6F737A' } },
     h('div.cbar'),
     h('div.in', {}, h('div.r1', {}, icon('script'), h('span.nm', {}, 'Реплики'), h('span.dim', { style: { fontSize: '11px' } }, String(byKind('cue').length))))));
   for (const t of tracks()) {
@@ -250,16 +296,65 @@ function renderLanes(recBy) {
   const sig = JSON.stringify([rows.map(r => [r.id, r.y, r.h]), ui.armed]);
   if (bg.dataset.sig === sig) { if (!el.playhead.isConnected) el.lanesInner.append(el.playhead, el.snapline, el.loop); return; }
   bg.dataset.sig = sig;
-  fill(bg, rows.map(r => h(`div.lane${r.kind === 'cues' ? '.cue-lane' : ''}${r.id === ui.armed ? '.armed' : ''}`, {
+  fill(bg, rows.map(r => h(`div.lane${r.kind === 'cues' ? '.cue-lane' : r.kind === 'video' || r.kind === 'orig' ? '.media-lane' : ''}${r.id === ui.armed ? '.armed' : ''}`, {
     style: { top: r.y + 'px', height: r.h + 'px' }, dataset: { row: r.id },
   })));
   if (!el.playhead.isConnected) el.lanesInner.append(el.playhead, el.snapline, el.loop);
 }
 
+// ---------- дорожки видео: раскадровка и волна оригинала ----------
+// Рисуем только видимую часть: холст стоит под окном прокрутки и перерисовывается при прокрутке/зуме.
+function drawMedia() {
+  if (!el.lanesInner) return;
+  const vr = rowOf('__video'), orr = rowOf('__orig');
+  if (!media.key || !vr) { el.vidCv?.remove(); el.origCv?.remove(); return; }
+  if (!el.vidCv) { el.vidCv = h('canvas.mrow'); el.origCv = h('canvas.mrow'); }
+  const bg = el.lanesInner.querySelector(':scope > .lanes-bg');
+  if (!el.vidCv.isConnected) { if (bg) bg.after(el.vidCv, el.origCv); else el.lanesInner.prepend(el.vidCv, el.origCv); }
+  const L = el.lanes.scrollLeft, W = el.lanes.clientWidth;
+  const dpr = devicePixelRatio || 1;
+  const prep = (cv, r) => {
+    const w = Math.round(W * dpr), hh = Math.round((r.h - 1) * dpr);
+    if (cv.width !== w || cv.height !== hh) { cv.width = w; cv.height = hh; }
+    cv.style.width = W + 'px'; cv.style.height = r.h - 1 + 'px';
+    cv.style.left = L + 'px'; cv.style.top = r.y + 'px';
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, r.h);
+    return g;
+  };
+  const end = (media.duration || audio.projectEnd()) * pps - L;
+  // кадры: плитки шириной кадра, каждая показывает момент своего левого края
+  const g = prep(el.vidCv, vr);
+  const th = vr.h - 6, tw = Math.max(20, Math.round(th * (media.thumbW / media.thumbH)));
+  for (let x = -(L % tw); x < Math.min(W, end); x += tw) {
+    const t = Math.max(0, (L + x) / pps);
+    const b = thumbAt(t);
+    const w = Math.min(tw, end - x);
+    if (b) g.drawImage(b, 0, 0, b.width * (w / tw), b.height, x, 3, w, th);
+    else { g.fillStyle = '#1f2024'; g.fillRect(x, 3, w - 1, th); }
+  }
+  // волна оригинала
+  const og = prep(el.origCv, orr);
+  const p = media.peaks;
+  const H = orr.h - 1, mid = H / 2;
+  if (!p) { og.fillStyle = '#ffffff14'; og.fillRect(0, mid, Math.max(0, Math.min(W, end)), 1); return; }
+  const amp = mid - 3;
+  og.fillStyle = prefs.get('origMuted', false) ? '#6F737A66' : '#8C9BB8';
+  for (let x = 0; x < Math.min(W, end); x++) {
+    const t0 = (L + x) / pps, t1 = (L + x + 1) / pps;
+    const i0 = Math.floor(t0 * p.rate), i1 = Math.max(i0 + 1, Math.floor(t1 * p.rate));
+    let lo = 0, hi = 0;
+    for (let i = i0; i < i1 && i < p.min.length; i++) { if (p.min[i] < lo) lo = p.min[i]; if (p.max[i] > hi) hi = p.max[i]; }
+    const y0 = mid - hi * amp, y1 = mid - lo * amp;
+    og.fillRect(x, y0, 1, Math.max(1, y1 - y0));
+  }
+}
+
 function selColorFor(id) {
   for (const o of doc.online.values()) {
     if (o.sid === doc.you?.sid) continue;
-    if (o.presence?.selection?.includes(id)) return member(o.userId)?.color || '#fff';
+    if (o.presence?.selection?.includes(id)) return userColor(o.userId);
   }
   return null;
 }
@@ -274,7 +369,10 @@ function renderClips() {
     seen.add(c.id);
     let e = clipEls.get(c.id);
     if (!e) {
-      e = h('div.clip', { dataset: { id: c.id, type: 'clip' } }, h('canvas'), h('div.cn'), h('div.eh.l', { dataset: { edge: 'l' } }), h('div.eh.r', { dataset: { edge: 'r' } }));
+      e = h('div.clip', { dataset: { id: c.id, type: 'clip' } }, h('canvas'), h('div.cn'), h('div.eh.l', { dataset: { edge: 'l' } }), h('div.eh.r', { dataset: { edge: 'r' } }),
+        h('div.gl', { dataset: { gain: '1' }, title: 'Громкость клипа — тяните вверх/вниз (двойной клик — 0 дБ)' }),
+        h('div.fh.l', { dataset: { fade: 'in' }, title: 'Фейд входа — тяните вправо (двойной клик — убрать)' }),
+        h('div.fh.r', { dataset: { fade: 'out' }, title: 'Фейд выхода — тяните влево (двойной клик — убрать)' }));
       clipEls.set(c.id, e);
       el.lanesInner.append(e);
     }
@@ -304,12 +402,21 @@ function placeClip(e, c, y, t) {
   e.classList.toggle('loading', !data);
   if (!data) audio.loadTake(c.takeId).catch(() => {});
   drawWave(e, c, data, w, t?.color);
-  drawFades(e, c, w);
+  drawFades(e, audio.withAutoFades(c), w);
+  // ручки: фейды — в верхних углах (на границе фейда), громкость — горизонтальная линия
+  e.querySelector('.fh.l').style.left = Math.min(w - 4, (c.fadeIn || 0) * pps + 5) + 'px';
+  e.querySelector('.fh.r').style.left = Math.max(4, w - (c.fadeOut || 0) * pps - 5) + 'px';
+  e.querySelector('.gl').style.top = gainY(c.gain ?? 1) + 'px';
 }
+
+// линия громкости: 0 дБ — посередине волны, вверх до +6 дБ (×2), вниз до тишины
+const waveH = () => TRACK_H - 6 - CLIP_TOP;
+const gainY = g => CLIP_TOP + (1 - clamp(g, 0, 2) / 2) * waveH();
+const yGain = y => clamp(2 * (1 - (y - CLIP_TOP) / waveH()), 0, 2);
 
 function drawWave(e, c, data, w, color) {
   const cv = e.querySelector('canvas');
-  const H = TRACK_H - 6 - 16;
+  const H = TRACK_H - 6 - CLIP_TOP;
   const cw = Math.min(Math.ceil(w), 8192);
   const key = `${c.takeId}|${c.offset}|${c.duration}|${cw}|${c.gain}|${!!data}|${color}`;
   if (cv.dataset.key === key) return;
@@ -332,16 +439,16 @@ function drawWave(e, c, data, w, color) {
 }
 
 function drawFades(e, c, w) {
-  const sig = `${c.fadeIn}|${c.fadeOut}|${w}`;
+  const sig = `${c.fadeIn}|${c.fadeOut}|${w}|${c.autoFadeIn}|${c.autoFadeOut}`;
   if (e.dataset.fades === sig) return;
   e.dataset.fades = sig;
   e.querySelectorAll('.fade').forEach(f => f.remove());
-  const mk = (left, width, dir) => h('div.fade', {
+  const mk = (left, width, dir, auto) => h(`div.fade${auto ? '.auto' : ''}`, {
     style: { left: left + 'px', width: width + 'px' },
     html: `<svg viewBox="0 0 100 100" preserveAspectRatio="none"><path d="${dir ? 'M0,100 L100,0 L0,0 Z' : 'M0,0 L100,100 L100,0 Z'}" fill="#0008"/><path d="${dir ? 'M0,100 L100,0' : 'M0,0 L100,100'}" stroke="#fff8" stroke-width="1.5" vector-effect="non-scaling-stroke" fill="none"/></svg>`,
   });
-  if (c.fadeIn > 0) e.append(mk(0, c.fadeIn * pps, true));
-  if (c.fadeOut > 0) e.append(mk(w - c.fadeOut * pps, c.fadeOut * pps, false));
+  if (c.fadeIn > 0) e.append(mk(0, c.fadeIn * pps, true, c.autoFadeIn));
+  if (c.fadeOut > 0) e.append(mk(w - c.fadeOut * pps, c.fadeOut * pps, false, c.autoFadeOut));
 }
 
 function mix(a, b, k) {
@@ -369,7 +476,7 @@ function renderCues() {
 function placeCue(e, q) {
   e.style.left = q.start * pps + 'px';
   e.style.width = Math.max(4, (q.end - q.start) * pps) + 'px';
-  e.style.top = 4 + 'px';
+  e.style.top = cueY() + 4 + 'px';
   e.style.height = CUE_H - 8 + 'px';
   e.style.setProperty('--cc', charColor(q.character));
   e.className = `cueb st-${q.status || 'todo'}${ui.sel.has(q.id) ? ' sel' : ''}`;
@@ -401,6 +508,45 @@ function renderLoop() {
   if (l) { el.loop.style.left = l.a * pps + 'px'; el.loop.style.width = (l.b - l.a) * pps + 'px'; }
 }
 
+// У каждого участника проекта — свой цвет курсора (и плейхеда, и рамки выделения). Цвет — по порядку
+// участника в проекте, поэтому у всех он одинаковый и не повторяется, пока людей не больше 12.
+const CURSOR_COLORS = ['#FF6666', '#3D8BFF', '#36B37E', '#FFAB00', '#A66CFF', '#00B8D9', '#FF7A3D', '#E553A8', '#8BC34A', '#5C6BFF', '#C08A5A', '#2EC4B6'];
+function userColor(userId) {
+  const ids = [...doc.members.keys()].map(String).sort();
+  const i = ids.indexOf(String(userId));
+  return CURSOR_COLORS[(i < 0 ? 0 : i) % CURSOR_COLORS.length];
+}
+
+// курсоры мыши других участников: стрелка их цвета и имя
+const CURSOR_SVG = '<svg width="18" height="18" viewBox="0 0 36 36" fill="none"><path d="M2.75093 7.86862L10.9215 30.7462C12.1303 34.1308 16.8427 34.3279 18.3299 31.056L20.7853 25.6542C21.3778 24.3506 22.622 23.4632 24.0475 23.3274L29.645 22.7943C33.5801 22.4195 34.6449 17.1719 31.167 15.2931L8.41912 3.004C5.19315 1.26123 1.51771 4.4156 2.75093 7.86862Z" fill="var(--pc)" stroke="white" stroke-width="4"/></svg>';
+function renderCursors() {
+  if (!el.lanesInner) return;
+  const seen = new Set();
+  for (const o of doc.online.values()) {
+    const c = o.presence?.cursor;
+    if (o.sid === doc.you?.sid || !c) continue;
+    // по вертикали — та же строка и то же место в ней, по горизонтали — то же время (зум у всех свой)
+    let y;
+    const row = rowOf(c.r);
+    if (row) y = row.y + c.f * row.h;
+    else if (c.r === '__end') { const last = rows[rows.length - 1]; y = (last ? last.y + last.h : 0) + c.f * 600; }
+    else if (c.r === '__video' || c.r === '__orig') y = 0; // у меня видео не открыто — курсор у верхнего края
+    else continue;
+    seen.add(o.sid);
+    let e = cursorEls.get(o.sid);
+    if (!e) {
+      e = h('div.rcursor', { html: CURSOR_SVG }, h('span'));
+      cursorEls.set(o.sid, e);
+    }
+    if (!e.isConnected) el.lanesInner.append(e);
+    const u = member(o.userId);
+    e.style.setProperty('--pc', userColor(o.userId));
+    e.lastChild.textContent = u?.displayName || '?';
+    e.style.transform = `translate(${c.t * pps}px, ${y}px)`;
+  }
+  for (const [sid, e] of cursorEls) if (!seen.has(sid)) { e.remove(); cursorEls.delete(sid); }
+}
+
 // плейхеды и флажки других участников
 function renderRemote() {
   if (!el.lanesInner) return;
@@ -418,9 +564,9 @@ function renderRemote() {
     const u = member(o.userId);
     const x = o.presence.playhead * pps;
     r.line.style.left = x + 'px';
-    r.line.style.setProperty('--pc', u?.color || '#fff');
+    r.line.style.setProperty('--pc', userColor(o.userId));
     r.line.classList.toggle('rec', !!o.presence.recording);
-    r.flag.style.setProperty('--pc', u?.color || '#fff');
+    r.flag.style.setProperty('--pc', userColor(o.userId));
     r.flag.style.left = x - el.lanes.scrollLeft + 'px';
     r.flag.textContent = (o.presence.recording ? '● ' : o.presence.playing ? '▶ ' : '') + (u?.displayName || '?');
   }
@@ -479,6 +625,7 @@ function drawRuler() {
     if (o) r.flag.style.left = o.presence.playhead * pps - L + 'px';
   }
   drawRulerHead(audio.position());
+  drawMedia();
 }
 
 function drawRulerHead(t) {
@@ -535,10 +682,15 @@ function snapTime(t, exclude, force = false) {
 // ---------- мышь на дорожках ----------
 function onLanesDown(e) {
   if (e.button !== 0) return;
+  // полосы прокрутки — это не дорожки: не перематываем и не выделяем
+  const lr = el.lanes.getBoundingClientRect();
+  if (e.clientY - lr.top >= el.lanes.clientTop + el.lanes.clientHeight || e.clientX - lr.left >= el.lanes.clientLeft + el.lanes.clientWidth) return;
   const target = e.target.closest('[data-type]');
   const r = el.lanesInner.getBoundingClientRect();
   const y = e.clientY - r.top;
   const t = timeAtClient(e.clientX);
+  const mrow = !target && rowAt(y);
+  if (mrow && (mrow.kind === 'video' || mrow.kind === 'orig')) { onRulerDown(e); return; }
   if (!target) {
     // пустое место: клик — перемотка и сброс выделения, протяжка — выделение рамкой
     const row = rowAt(y);
@@ -553,8 +705,82 @@ function onLanesDown(e) {
   else if (!ui.sel.has(id)) select(id);
   if (!canEdit()) return;
   const edge = e.target.dataset.edge;
-  if (edge) startTrim(e, item, edge);
+  if (e.target.dataset.fade && item.kind === 'clip') startFade(e, item, e.target.dataset.fade);
+  else if (e.target.dataset.gain && item.kind === 'clip') startGain(e, item);
+  else if (edge) startTrim(e, item, edge);
   else startMove(e, t, y);
+}
+
+// фейд за верхний угол клипа
+function startFade(e, item, which) {
+  const o = { ...item };
+  drag = { ids: new Set([item.id]) };
+  const ce = clipEls.get(item.id);
+  const handle = e.target;
+  handle.classList.add('on');
+  document.body.classList.add('resizing-ew');
+  const tr = tracks().find(x => x.id === o.trackId);
+  let res = null;
+  const move = ev => {
+    const t = timeAtClient(ev.clientX);
+    if (which === 'in') res = { fadeIn: round(clamp(t - o.start, 0, Math.min(60, o.duration - (o.fadeOut || 0)))) };
+    else res = { fadeOut: round(clamp(o.start + o.duration - t, 0, Math.min(60, o.duration - (o.fadeIn || 0)))) };
+    placeClip(ce, { ...o, ...res }, rowOf(o.trackId).y, tr);
+    tip(ce, `${which === 'in' ? 'вход' : 'выход'} ${(res.fadeIn ?? res.fadeOut).toFixed(2)} с`);
+  };
+  const up = () => {
+    removeEventListener('pointermove', move); removeEventListener('pointerup', up);
+    handle.classList.remove('on');
+    document.body.classList.remove('resizing-ew');
+    tip(ce, null);
+    drag = null;
+    if (res) update(item.id, res, { label: 'фейд' }); else queue();
+  };
+  addEventListener('pointermove', move); addEventListener('pointerup', up);
+}
+
+// громкость за линию: тянем вверх/вниз; если выбрано несколько клипов — меняются все (пропорционально)
+function startGain(e, item) {
+  const ce = clipEls.get(item.id);
+  const handle = e.target;
+  const sel = [...ui.sel].map(id => doc.items.get(id)).filter(c => c?.kind === 'clip');
+  const list = sel.some(c => c.id === item.id) ? sel : [item];
+  const orig = new Map(list.map(c => [c.id, { ...c }]));
+  const g0 = item.gain ?? 1;
+  drag = { ids: new Set(list.map(c => c.id)) };
+  handle.classList.add('on');
+  document.body.classList.add('resizing-ns');
+  const cr = ce.getBoundingClientRect();
+  const dy = e.clientY - (cr.top + gainY(g0));
+  let gNew = null;
+  const gainFor = (c, g) => (c.id === item.id ? g : clamp((orig.get(c.id).gain ?? 1) * (g0 ? g / g0 : 1), 0, 4));
+  const move = ev => {
+    gNew = Math.round(yGain(ev.clientY - cr.top - dy) * 1000) / 1000;
+    if (gNew > 0 && Math.abs(gainToDb(gNew)) < 0.4) gNew = 1; // липнет к 0 дБ
+    for (const c of list) {
+      const o = orig.get(c.id);
+      const r = rowOf(o.trackId);
+      if (r) placeClip(clipEls.get(c.id), { ...o, gain: gainFor(c, gNew) }, r.y, tracks().find(x => x.id === o.trackId));
+    }
+    tip(ce, gNew <= 0.0005 ? '−∞ дБ' : `${gainToDb(gNew) > 0 ? '+' : ''}${gainToDb(gNew).toFixed(1)} дБ`);
+  };
+  const up = () => {
+    removeEventListener('pointermove', move); removeEventListener('pointerup', up);
+    handle.classList.remove('on');
+    document.body.classList.remove('resizing-ns');
+    tip(ce, null);
+    drag = null;
+    if (gNew == null) { queue(); return; }
+    batch(list.map(c => ({ type: 'update', id: c.id, data: { gain: Math.round(gainFor(c, gNew) * 1000) / 1000 } })), { label: 'громкость клипа' });
+  };
+  addEventListener('pointermove', move); addEventListener('pointerup', up);
+}
+
+function tip(ce, text) {
+  let t = ce.querySelector('.gtip');
+  if (!text) { t?.remove(); return; }
+  if (!t) { t = h('div.gtip'); ce.append(t); }
+  t.textContent = text;
 }
 
 function marquee(e, t0, y0) {
@@ -570,7 +796,8 @@ function marquee(e, t0, y0) {
     const a = Math.min(t0, t1), b = Math.max(t0, t1), ya = y, yb = y + hh;
     const ids = [];
     for (const c of byKind('clip')) { const rr = rowOf(c.trackId); if (rr && c.start < b && c.start + c.duration > a && rr.y < yb && rr.y + rr.h > ya) ids.push(c.id); }
-    if (CUE_H > ya) for (const q of byKind('cue')) if (q.start < b && q.end > a) ids.push(q.id);
+    const cy = cueY();
+    if (cy + CUE_H > ya && cy < yb) for (const q of byKind('cue')) if (q.start < b && q.end > a) ids.push(q.id);
     select(ids, { add: ev.shiftKey });
   };
   const up = () => {
@@ -594,7 +821,7 @@ function startMove(e, t0, y0) {
     const t = timeAtClient(ev.clientX);
     const r = el.lanesInner.getBoundingClientRect();
     if (!moved && Math.abs(t - t0) * pps < 3 && Math.abs(ev.clientY - r.top - y0) < 3) return;
-    if (!moved) { moved = true; drag = { ids }; }
+    if (!moved) { moved = true; drag = { ids }; document.body.classList.add('grabbing'); }
     dt = Math.max(-minStart, t - t0);
     // привязка по ближайшему краю первого объекта
     const lead = items.find(i => i.start === minStart);
@@ -621,6 +848,7 @@ function startMove(e, t0, y0) {
   const up = () => {
     removeEventListener('pointermove', move); removeEventListener('pointerup', up);
     el.snapline.style.display = 'none';
+    document.body.classList.remove('grabbing');
     drag = null;
     if (!moved) return;
     const ops = [];
@@ -771,6 +999,7 @@ function startTrim(e, item, edge) {
   const o = { ...item };
   const ids = new Set([item.id]);
   drag = { ids };
+  document.body.classList.add('resizing-ew');
   const maxLen = item.kind === 'clip' ? (audio.takeData(item.takeId)?.buffer.duration ?? (o.offset + o.duration)) : Infinity;
   let res = null;
   const move = ev => {
@@ -798,12 +1027,16 @@ function startTrim(e, item, edge) {
     removeEventListener('pointermove', move); removeEventListener('pointerup', up);
     el.snapline.style.display = 'none';
     drag = null;
+    document.body.classList.remove('resizing-ew');
     if (res) update(item.id, res, { label: 'подрезка' }); else queue();
   };
   addEventListener('pointermove', move); addEventListener('pointerup', up);
 }
 
 function onLanesDbl(e) {
+  const hid = e.target.closest('[data-type]')?.dataset.id;
+  if (e.target.dataset?.gain && hid && canEdit()) { update(hid, { gain: 1 }, { label: 'громкость клипа' }); return; }
+  if (e.target.dataset?.fade && hid && canEdit()) { update(hid, { [e.target.dataset.fade === 'in' ? 'fadeIn' : 'fadeOut']: 0 }, { label: 'фейд' }); return; }
   const target = e.target.closest('[data-type]');
   if (target?.dataset.type === 'cue') { editCueText(doc.items.get(target.dataset.id)); return; }
   if (target) return;

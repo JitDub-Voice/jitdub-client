@@ -38,7 +38,7 @@ export async function api(path, { method = 'GET', body, headers = {}, raw = fals
       body: isBin ? body : body ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
-    throw new ApiError(`сервер недоступен (${session.server})`, 0);
+    throw new ApiError('нет связи с JitDub — проверьте интернет', 0);
   }
   if (raw && r.ok) return r;
   const j = await r.json().catch(() => null);

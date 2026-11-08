@@ -12,7 +12,6 @@ export function showAuth(onDone) {
   const user = h('input', { type: 'text', placeholder: 'логин', autocomplete: 'username', spellcheck: false });
   const name = h('input', { type: 'text', placeholder: 'как вас видят другие (например, Аня)', spellcheck: false });
   const pass = h('input', { type: 'password', placeholder: '••••••', autocomplete: 'current-password' });
-  const server = h('input', { type: 'text', value: session.server, spellcheck: false, placeholder: DEFAULT_SERVER });
   const invite = h('input', { type: 'text', placeholder: 'XXXX-XXXX-XXXX', spellcheck: false, autocomplete: 'off', style: { textTransform: 'uppercase', fontFamily: '"JetBrains Mono", monospace' } });
   const nameRow = h('div', {},
     h('label', {}, 'Ключ приглашения'), invite,
@@ -34,7 +33,6 @@ export function showAuth(onDone) {
     onsubmit: async e => {
       e.preventDefault();
       err.textContent = '';
-      session.server = server.value;
       btn.disabled = true;
       try {
         const body = { username: user.value.trim(), password: pass.value, displayName: name.value.trim(), inviteCode: invite.value.trim().toUpperCase() };
@@ -55,8 +53,7 @@ export function showAuth(onDone) {
     nameRow,
     h('label', {}, 'Пароль'), pass,
     btn, err,
-    h('div.dim', { style: { fontSize: '12px', lineHeight: '16px', marginTop: '4px' } }, 'Регистрация — по ключу приглашения от администратора сервера.'),
-    h('details', {}, h('summary', {}, 'Сервер'), h('div', { style: { marginTop: '6px' } }, server)));
+    h('div.dim', { style: { fontSize: '12px', lineHeight: '16px', marginTop: '4px' } }, 'Регистрация — по ключу приглашения от администратора.'));
   setMode('login');
   fill(root(), form);
   setTimeout(() => user.focus(), 50);

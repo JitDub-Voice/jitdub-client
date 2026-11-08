@@ -95,7 +95,7 @@ body.s-studio #studio { display: grid; }
 .transport .time.rec { color: #ff8a8d; }
 .transport .tsep { width: 1px; height: 18px; background: var(--p-gray-4); margin: 0 3px; }
 .meter { position: relative; width: 70px; height: 8px; border-radius: 2px; background: var(--p-gray-3); overflow: hidden; }
-.meter i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: linear-gradient(90deg, #5FAD65 0 70%, #F2C55C 70% 88%, #E5484D 88%); background-size: 70px 100%; transition: width .05s; }
+.meter i { position: absolute; inset: 0; background: linear-gradient(90deg, #5FAD65 0 70%, #F2C55C 70% 88%, #E5484D 88%); clip-path: inset(0 calc(100% - var(--lv, 0%)) 0 0); transition: clip-path .06s linear; }
 .meter.off { opacity: .4; }
 
 .online { display: flex; align-items: center; }
@@ -141,7 +141,8 @@ body.s-studio #studio { display: grid; }
 
 /* ---------- студия ---------- */
 #studio { grid-template-columns: var(--left-w) 4px minmax(0, 1fr) 4px var(--right-w); padding: 4px; gap: 0; min-height: 0; }
-#center { display: grid; grid-template-rows: minmax(120px, 1fr) 4px var(--tl-h); min-width: 0; min-height: 0; }
+#center { display: grid; grid-template-rows: minmax(200px, 1fr) 4px min(var(--tl-h), max(140px, calc(100% - 244px))); min-width: 0; min-height: 0; }
+#p-video { min-height: 0; overflow: hidden; }
 .panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border: 1px solid var(--p-gray-3); border-radius: 6px; overflow: hidden; }
 .splitter { position: relative; z-index: 3; border-radius: 2px; }
 .splitter.v { cursor: col-resize; }
@@ -190,7 +191,8 @@ body.s-studio #studio { display: grid; }
 /* ---------- видео ---------- */
 #p-video { background: #000; position: relative; }
 .vwrap { flex: 1; position: relative; min-height: 0; display: grid; place-items: center; overflow: hidden; }
-.vwrap video { max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.vwrap { background: #000; }
+.vwrap video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
 .vdrop { position: absolute; inset: 0; display: grid; place-items: center; align-content: center; gap: 12px; color: var(--dim); text-align: center; padding: 20px; }
 .vdrop b { color: var(--text); font-size: 14px; }
 .vdrop.over { background: #3574f022; outline: 2px dashed var(--accent); outline-offset: -10px; }
@@ -367,3 +369,28 @@ body.s-studio #studio { display: grid; }
 .jd-update .prog .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
 .jd-update .prog span { font-size: 12px; color: var(--dim); }
 .upd-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--p-blue-7); display: inline-block; }
+
+/* перетаскивание клипов — рука; ручки фейдов в верхних углах и линия громкости */
+body.grabbing, body.grabbing * { cursor: grabbing !important; }
+body.resizing-ew, body.resizing-ew * { cursor: ew-resize !important; }
+body.resizing-ns, body.resizing-ns * { cursor: ns-resize !important; }
+.clip .fh { position: absolute; top: 0; width: 10px; height: 10px; margin-left: -5px; z-index: 3; cursor: ew-resize; opacity: 0; transition: opacity .1s; }
+.clip .fh::after { content: ''; position: absolute; left: 2px; top: 2px; width: 6px; height: 6px; border-radius: 1px; background: #fff; box-shadow: 0 0 0 1px #0008; }
+.clip .gl { position: absolute; left: 0; right: 0; height: 9px; margin-top: -4px; z-index: 2; cursor: ns-resize; opacity: 0; transition: opacity .1s; }
+.clip .gl::after { content: ''; position: absolute; left: 0; right: 0; top: 4px; height: 1px; background: #ffd25e; box-shadow: 0 0 2px #000; }
+.clip:hover .fh, .clip:hover .gl, .clip.sel .fh, .clip.sel .gl, .clip .fh.on, .clip .gl.on { opacity: 1; }
+.clip .gtip { position: absolute; right: 4px; bottom: 3px; z-index: 4; font: 10px "JetBrains Mono", Consolas, monospace; background: #000c; color: #ffd25e; padding: 0 4px; border-radius: 3px; pointer-events: none; }
+.clip .fade.auto path:first-child { fill: #0005; }
+.clip .fade.auto path:last-child { stroke: #ffd25e99; stroke-dasharray: 3 2; }
+
+/* дорожки видео и звука оригинала */
+.mrow { position: absolute; left: 0; pointer-events: none; }
+.mrow canvas { display: block; }
+.thead.media { --tc: #43454A; }
+.thead.media .r1 .nm { font-weight: 600; }
+.lane.media-lane { background: #141518; }
+
+/* курсоры участников на таймлайне */
+.rcursor { position: absolute; left: 0; top: 0; z-index: 20; pointer-events: none; transition: transform .07s linear; will-change: transform; }
+.rcursor svg { display: block; margin: -2px 0 0 -1px; filter: drop-shadow(0 1px 2px #0008); }
+.rcursor span { position: absolute; left: 16px; top: 15px; white-space: nowrap; background: var(--pc); color: #fff; font-weight: 700; font-size: 12px; line-height: 16px; padding: 1px 7px; border: 2px solid #fff; border-radius: 6px; box-shadow: 0 1px 3px #0008; }

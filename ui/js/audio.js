@@ -15,10 +15,37 @@ export function audioCtx() {
     master = ctx.createGain();
     master.gain.value = prefs.get('masterGain', 1);
     master.connect(ctx.destination);
+    applyOutput();
   }
   if (ctx.state === 'suspended') ctx.resume();
   return ctx;
 }
+
+// ---------- устройство вывода ----------
+export async function listOutputs() {
+  try { return (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audiooutput'); } catch { return []; }
+}
+export const outputSupported = () => typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
+function applyOutput() {
+  const id = prefs.get('outputDevice', '');
+  const sink = id && id !== 'default' ? id : '';
+  if (ctx?.setSinkId) ctx.setSinkId(sink).catch(e => console.warn('вывод:', e));
+  // видео до подключения к WebAudio играет само — ему тоже
+  if (T.video?.setSinkId && !O.out) T.video.setSinkId(sink).catch(() => {});
+}
+// короткий тестовый сигнал (два тона) — проверить, куда идёт звук
+export function testTone() {
+  audioCtx();
+  const t = ctx.currentTime + 0.02;
+  [[660, 0], [880, 0.18]].forEach(([f, d]) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = f;
+    g.gain.setValueAtTime(0, t + d); g.gain.linearRampToValueAtTime(0.2, t + d + 0.01);
+    g.gain.setValueAtTime(0.2, t + d + 0.14); g.gain.linearRampToValueAtTime(0, t + d + 0.16);
+    o.connect(g).connect(master); o.start(t + d); o.stop(t + d + 0.17);
+  });
+}
+export function setOutputDevice(id) { prefs.set('outputDevice', id || ''); applyOutput(); }
 
 export const masterNode = () => { audioCtx(); return master; };
 export function setMasterGain(v) { audioCtx(); master.gain.value = v; prefs.set('masterGain', v); }
@@ -130,6 +157,9 @@ export function attachOriginal() {
   events.emit('original');
 }
 export const originalRouted = () => !!O.out;
+// звук оригинала, декодированный целиком (моно, низкая частота) — для скраба при перетаскивании
+let origBuf = null;
+export function setOriginalBuffer(b) { origBuf = b; }
 // для отладки и индикации: текущие уровни путей оригинала
 export const originalGains = () => (O.out ? { normal: +O.normal.gain.value.toFixed(3), cut: +O.cut.gain.value.toFixed(3), out: +O.out.gain.value.toFixed(3), segments: voiceSegments() } : null);
 
@@ -203,6 +233,23 @@ function clipGainAt(c, x) {
   if (c.fadeIn > 0 && x < c.fadeIn) k = Math.min(k, Math.max(0, x / c.fadeIn));
   if (c.fadeOut > 0 && x > c.duration - c.fadeOut) k = Math.min(k, Math.max(0, (c.duration - x) / c.fadeOut));
   return g * k;
+}
+
+// Наложение дублей на одной дорожке — автоматический кроссфейд: на длину нахлёста конец раннего
+// клипа затухает, а начало позднего нарастает (если свои фейды клипа короче). В документ не пишется —
+// считается на лету, поэтому сдвинул клип — кроссфейд пересчитался сам, у всех участников.
+export function withAutoFades(c, list = byKind('clip')) {
+  let fi = c.fadeIn || 0, fo = c.fadeOut || 0;
+  const end = c.start + c.duration;
+  for (const o of list) {
+    if (o.id === c.id || o.trackId !== c.trackId || o.mute) continue;
+    const oe = o.start + o.duration;
+    if (o.start <= c.start && oe > c.start && oe < end) fi = Math.max(fi, oe - c.start);
+    else if (o.start > c.start && o.start < end && oe >= end) fo = Math.max(fo, end - o.start);
+  }
+  if (fi === (c.fadeIn || 0) && fo === (c.fadeOut || 0)) return c;
+  if (fi + fo > c.duration) { const k = c.duration / (fi + fo); fi *= k; fo *= k; }
+  return { ...c, fadeIn: fi, fadeOut: fo, autoFadeIn: fi > (c.fadeIn || 0), autoFadeOut: fo > (c.fadeOut || 0) };
 }
 
 // Микрофейды на любом краю звука (начало/конец клипа, старт с середины, стоп): без них резкий обрыв волны
@@ -279,7 +326,7 @@ function scheduleAll() {
     if (!play.has(clip.trackId) || clip.start + clip.duration <= from) continue;
     const data = takeData(clip.takeId);
     if (!data) { loadTake(clip.takeId).then(() => T.playing && reschedule()).catch(() => {}); continue; }
-    const s = scheduleClip(ctx, clip, data.buffer, from, now, trackNode(tmap.get(clip.trackId)).gain);
+    const s = scheduleClip(ctx, withAutoFades(clip), data.buffer, from, now, trackNode(tmap.get(clip.trackId)).gain);
     if (s) T.sources.push(s);
   }
   scheduleDuck(from, now);
@@ -301,7 +348,7 @@ export function play(from = position()) {
     if (!play.has(clip.trackId)) continue;
     const data = takeData(clip.takeId);
     if (!data) { loadTake(clip.takeId).then(() => T.playing && reschedule()).catch(() => {}); continue; }
-    const s = scheduleClip(ctx, clip, data.buffer, T.startPos, T.startCtx, trackNode(tmap.get(clip.trackId)).gain);
+    const s = scheduleClip(ctx, withAutoFades(clip), data.buffer, T.startPos, T.startCtx, trackNode(tmap.get(clip.trackId)).gain);
     if (s) T.sources.push(s);
   }
   scheduleDuck(T.startPos, T.startCtx);
@@ -368,6 +415,21 @@ export function scrub(t, { exclude = null, extra = null } = {}) {
     g.gain.linearRampToValueAtTime(0, c0 + LEN);
     src.connect(g).connect(trackNode(tmap.get(clip.trackId)).gain);
     src.start(c0, (clip.offset || 0) + (t - clip.start), LEN);
+    scrubSrcs.push(src);
+  }
+  // и кусочек оригинала (аниме) под курсором — через его регулятор громкости
+  const lvl = origLevel();
+  if (origBuf && lvl > 0 && t < origBuf.duration) {
+    const src = ctx.createBufferSource();
+    src.buffer = origBuf;
+    const g = ctx.createGain();
+    const v = O.out ? 1 : lvl;
+    g.gain.setValueAtTime(0, c0);
+    g.gain.linearRampToValueAtTime(v, c0 + 0.01);
+    g.gain.setValueAtTime(v, c0 + LEN - 0.015);
+    g.gain.linearRampToValueAtTime(0, c0 + LEN);
+    src.connect(g).connect(O.out || master);
+    src.start(c0, t, LEN);
     scrubSrcs.push(src);
   }
 }
@@ -615,7 +677,7 @@ export async function mixdown({ trackIds = null, from = 0, to = null, bits = 16,
   }
   for (const c of clips) {
     const d = takeData(c.takeId);
-    if (d && nodes.has(c.trackId)) scheduleClip(off, c, d.buffer, from, 0, nodes.get(c.trackId));
+    if (d && nodes.has(c.trackId)) scheduleClip(off, withAutoFades(c, clips), d.buffer, from, 0, nodes.get(c.trackId));
   }
   const out = await off.startRendering();
   return encodeWav([out.getChannelData(0), out.getChannelData(1)], sr, bits);

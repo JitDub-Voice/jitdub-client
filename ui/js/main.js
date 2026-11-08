@@ -347,7 +347,7 @@ audio.events.on('seek', t => { if (hdr.time) hdr.time.textContent = fmtTime(t); 
 audio.events.on('transport', updateHeader);
 audio.events.on('record', r => { updateHeader(); if (!r) countdown(0); });
 audio.events.on('input', updateHeader);
-audio.events.on('meter', p => { if (hdr.meter) hdr.meter.firstChild.style.width = Math.min(100, Math.sqrt(p) * 100) + '%'; });
+audio.events.on('meter', p => { if (hdr.meter) hdr.meter.firstChild.style.setProperty('--lv', Math.min(100, Math.sqrt(p) * 100) + '%'); });
 audio.events.on('error', m => toast(m, 'err'));
 audio.events.on('notice', m => toast(m, 'info', 4000));
 
@@ -527,7 +527,7 @@ async function openInvites() {
 async function openSettings() {
   const micBox = h('div.col', { style: { gap: '6px', width: '100%' } });
   const micMeter = h('div.meter', { style: { width: '100%' } }, h('i'));
-  const offMeter = audio.events.on('meter', p => { micMeter.firstChild.style.width = Math.min(100, Math.sqrt(p) * 100) + '%'; });
+  const offMeter = audio.events.on('meter', p => { micMeter.firstChild.style.setProperty('--lv', Math.min(100, Math.sqrt(p) * 100) + '%'); });
   const renderMic = async (detect = false) => {
     const inputs = detect ? await audio.detectInputs().catch(e => { micError(e); return []; }) : await audio.listInputs();
     const cur = prefs.get('inputDevice', '');
@@ -539,15 +539,31 @@ async function openSettings() {
     const noLabels = named.length && named.every(d => !d.label);
     fill(micBox,
       h('div.row', { style: { width: '100%' } }, devSel,
-        h('button.ui-btn.secondary.slim', { 'data-tip': 'Найти микрофоны (спросит разрешение у Windows)', onclick: () => renderMic(true) }, icon('refresh'), 'Определить')),
+        h('button.ui-btn.secondary.slim', { 'data-tip': 'Найти микрофоны (спросит разрешение у Windows)', onclick: () => renderMic(true).then(() => renderOut()) }, icon('refresh'), 'Определить')),
       h('div.row', { style: { width: '100%' } },
         h('button.ui-btn.secondary.slim', { onclick: async () => { if (audio.inputOpen()) audio.closeInput(); else await audio.openInput().catch(micError); renderMic(); } }, icon('mic'), audio.inputOpen() ? 'Остановить проверку' : 'Проверить'),
-        micMeter),
+        micMeter,
+        h(`button.ui-btn.secondary.slim${prefs.get('monitor', false) ? '.on' : ''}`, {
+          'data-tip': 'Слышать себя в наушниках — включайте только в наушниках, иначе будет свист',
+          onclick: async () => { const on = !prefs.get('monitor', false); audio.setMonitor(on); if (on && !audio.inputOpen()) await audio.openInput().catch(micError); renderMic(); },
+        }, icon('headphones'), prefs.get('monitor', false) ? 'Слышу себя' : 'Слышать себя')),
       !inputs.length ? h('span', { style: { color: 'var(--p-red-8)', fontSize: '12px' } }, 'Микрофоны не найдены — подключите микрофон и нажмите «Определить»')
         : noLabels ? h('span.dim', { style: { fontSize: '12px' } }, 'Названия микрофонов появятся после «Определить» (Windows спросит разрешение)')
         : h('span.dim', { style: { fontSize: '12px' } }, `Найдено микрофонов: ${named.length}. Скажите что-нибудь при включённой проверке — полоска должна двигаться.`));
   };
   await renderMic();
+  const outBox = h('div.col', { style: { gap: '6px', width: '100%' } });
+  const renderOut = async () => {
+    const outs = (await audio.listOutputs()).filter(d => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications');
+    const cur = prefs.get('outputDevice', '');
+    const sel = dd(outs.some(d => d.deviceId === cur) ? cur : '', [{ value: '', label: 'Системный по умолчанию' }, ...outs.map(d => ({ value: d.deviceId, label: d.label || 'Устройство вывода (нажмите «Определить» у микрофона)' }))], v => audio.setOutputDevice(v), { width: '100%' });
+    if (!audio.outputSupported()) sel.disabled = true;
+    fill(outBox,
+      h('div.row', { style: { width: '100%' } }, sel,
+        h('button.ui-btn.secondary.slim', { 'data-tip': 'Короткий тестовый сигнал в выбранное устройство', onclick: () => audio.testTone() }, icon('play'), 'Тест')),
+      !audio.outputSupported() ? h('span.dim', { style: { fontSize: '12px' } }, 'Выбор вывода недоступен в этой версии WebView — звук идёт в системное устройство') : null);
+  };
+  await renderOut();
   const num = (key, def, { min, max, step, suffix }) => {
     const i = h('input', { type: 'number', value: prefs.get(key, def), min, max, step, style: { width: '90px' } });
     i.addEventListener('change', () => prefs.set(key, clamp(+i.value || 0, min, max)));
@@ -587,12 +603,12 @@ async function openSettings() {
       h('div.f', {}, h('label', {}, 'Аватарка'), avaBox),
       h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Запись'),
       h('div.f.top', {}, h('label', {}, 'Микрофон'), micBox),
+      h('div.f.top', {}, h('label', {}, 'Вывод звука'), outBox),
       h('div.f', {}, h('label', {}, 'Задержка входа'), num('inputLatencyMs', 20, { min: -500, max: 1000, step: 1, suffix: `мс + выход ${(lat * 1000).toFixed(0)} мс (авто)` })),
       h('div.hint', {}, 'Если голос в дублях опаздывает относительно видео — увеличьте, если спешит — уменьшите.'),
       h('div.f', {}, h('label', {}, 'Преролл реплики'), num('preroll', 2, { min: 0, max: 10, step: 0.5, suffix: 'с до начала реплики (обратный отсчёт)' })),
       h('div.f', {}, h('label', {}, 'Хвост реплики'), num('tail', 0.6, { min: 0, max: 5, step: 0.1, suffix: 'с после конца — автостоп' })),
       h('div.f', {}, h('label', {}, 'Преролл свободной записи'), num('freePreroll', 0, { min: 0, max: 10, step: 0.5, suffix: 'с (клавиша R)' })),
-      h('div.f', {}, h('label', {}, ''), chk('monitor', false, 'Слышать себя в наушниках (мониторинг входа)', v => audio.setMonitor(v))),
       h('div.f', {}, h('label', {}, ''), chk('muteOriginalOnRec', false, 'Глушить оригинал во время записи (если пишете без наушников)')),
       h('div.f', {}, h('label', {}, ''), chk('autoReview', false, 'Сразу прослушать дубль после записи')),
       h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Оригинал под озвучкой'),
@@ -603,10 +619,7 @@ async function openSettings() {
       h('div.f', {}, h('label', {}, ''), chk('returnOnStop', false, 'После стопа возвращать плейхед к месту старта (кнопка ↶ в транспорте)', () => updateHeader())),
       h('div.f', {}, h('label', {}, ''), chk('scrubAudio', true, 'Звук под курсором при перетаскивании (скраб)')),
       h('div.f', {}, h('label', {}, ''), chk('showSubs', true, 'Показывать текст реплики поверх видео', () => refreshTimeline())),
-      h('div.f', {}, h('label', {}, 'Скорость ленты ритмо'), num('rythmoSpeed', 160, { min: 40, max: 600, step: 10, suffix: 'пикс/с' })),
-      h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Сервер'),
-      h('div.f', {}, h('label', {}, 'Адрес'), h('span.mono', {}, session.server)),
-      h('div.hint', {}, 'Сменить сервер можно на экране входа (выйдите из аккаунта).')),
+      h('div.f', {}, h('label', {}, 'Скорость ленты ритмо'), num('rythmoSpeed', 160, { min: 40, max: 600, step: 10, suffix: 'пикс/с' }))),
     onClose: () => offMeter(),
     buttons: [{ label: 'Готово', primary: true, onClick: async close => {
       close();
@@ -722,7 +735,7 @@ function initSplitters() {
         let v = start.v;
         if (kind === 'left') v = clamp(start.v + (ev.clientX - start.x), 220, 600);
         if (kind === 'right') v = clamp(start.v - (ev.clientX - start.x), 240, 560);
-        if (kind === 'timeline') v = clamp(start.v - (ev.clientY - start.y), 160, innerHeight - 220);
+        if (kind === 'timeline') v = clamp(start.v - (ev.clientY - start.y), 160, innerHeight - 330);
         prefs.set('split.' + kind, v);
         applySplits();
       };
@@ -739,7 +752,7 @@ function renderStatus() {
   const L = $('st-left'), R = $('st-right');
   if (screen !== 'studio') {
     bar.className = '';
-    fill(L, h('span', {}, session.server.replace(/^https?:\/\//, '')));
+    fill(L);
     fill(R, h('span', {}, `JitDub ${version}`));
     return;
   }
