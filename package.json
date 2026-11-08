@@ -7,8 +7,12 @@
   "scripts": {
     "app": "cargo run --manifest-path src-tauri/Cargo.toml",
     "app:release": "cargo run --release --manifest-path src-tauri/Cargo.toml",
-    "build": "cargo build --release --manifest-path src-tauri/Cargo.toml",
+    "build": "tauri build",
+    "tauri": "tauri",
     "web": "node dev-server.mjs",
     "icons": "node scripts/make-icons.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
   }
 }

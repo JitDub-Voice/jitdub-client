@@ -355,3 +355,15 @@ body.s-studio #studio { display: grid; }
 .vtop button.pill.up { background: var(--p-blue-6); color: #fff; }
 .vtop button.pill.up:hover { background: var(--p-blue-7); }
 .vtop .pill a { color: #9cc0ff; }
+/* уведомление об обновлении */
+.jd-update { position: fixed; right: 14px; bottom: 34px; z-index: 960; width: 340px; padding: 12px 14px; border-radius: 10px; background: var(--panel); border: 1px solid var(--p-blue-4); box-shadow: 0 12px 36px #000a; display: flex; flex-direction: column; gap: 10px; }
+.jd-update .hd { display: flex; align-items: center; gap: 8px; }
+.jd-update .hd .dim { margin-left: auto; font-size: 11px; }
+.jd-update .notes { font-size: 12px; line-height: 17px; color: var(--p-gray-10); white-space: pre-wrap; max-height: 140px; overflow: auto; user-select: text; }
+.jd-update .acts { display: flex; justify-content: flex-end; gap: 8px; }
+.jd-update .acts .dim { font-size: 12px; }
+.jd-update .prog { display: flex; flex-direction: column; gap: 4px; }
+.jd-update .prog .bar { height: 6px; border-radius: 3px; background: var(--p-gray-4); overflow: hidden; }
+.jd-update .prog .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.jd-update .prog span { font-size: 12px; color: var(--dim); }
+.upd-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--p-blue-7); display: inline-block; }

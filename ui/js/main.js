@@ -12,6 +12,7 @@ import { mountTimeline, deleteSelection, splitAtPlayhead, addMarker, setPps, scr
 import { mountVideo, pickVideo, countdown } from './video.js';
 import { mountScript, pickSubs } from './script.js';
 import { mountSide } from './side.js';
+import { appVersion, checkForUpdates, startUpdateChecks, updateAvailable } from './updater.js';
 import { menu, menuAt, modal, prompt, toast, confirm, select as dd } from './kit.js';
 
 const $ = id => document.getElementById(id);
@@ -200,6 +201,7 @@ function userMenu(btn) {
     { label: session.user?.username ? `@${session.user.username}` : '', disabled: true },
     { label: 'Профиль и настройки…', icon: 'settings', onClick: openSettings },
     session.user?.isAdmin ? { label: 'Ключи приглашения…', icon: 'link', onClick: openInvites } : null,
+    { label: updateAvailable() ? `Обновить до ${updateAvailable().version}…` : 'Проверить обновления', icon: 'download', onClick: () => checkForUpdates({ manual: true }) },
     { label: 'Горячие клавиши', icon: 'help', sc: 'F1', onClick: showHotkeys },
     '-',
     { label: 'Выйти из аккаунта', icon: 'exit', danger: true, onClick: () => logout() },
@@ -690,7 +692,7 @@ function renderStatus() {
   if (screen !== 'studio') {
     bar.className = '';
     fill(L, h('span', {}, session.server.replace(/^https?:\/\//, '')));
-    fill(R, h('span', {}, 'JitDub 0.1.0'));
+    fill(R, h('span', {}, `JitDub ${version}`));
     return;
   }
   bar.className = doc.status === 'online' ? '' : 'off';
@@ -730,5 +732,11 @@ docEvents.on('videoLoaded', () => { if (!byKind('clip').length && !cues().length
 uiEvents.on('select', renderStatus);
 uiEvents.on('arm', renderStatus);
 audio.events.on('record', renderStatus);
+
+// версия приложения — в строке состояния; проверка обновлений в фоне
+let version = '';
+appVersion().then(v => { version = v; renderStatus(); });
+window.addEventListener('jitdub:update', () => renderHeader());
+startUpdateChecks();
 
 boot();

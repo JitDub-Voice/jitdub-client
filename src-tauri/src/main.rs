@@ -290,12 +290,70 @@ fn cancel_download(dest: String) {
     CANCELLED.lock().unwrap().push(dest);
 }
 
+// ---------- обновления ----------
+// Релизы собирает GitHub Actions (.github/workflows/release.yml) при смене версии в package.json;
+// latest.json и установщик подписаны ключом, публичная часть — в tauri.conf.json (plugins.updater.pubkey).
+
+#[derive(serde::Serialize)]
+struct UpdateInfo {
+    version: String,
+    current: String,
+    notes: Option<String>,
+    date: Option<String>,
+}
+
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
+    Ok(update.map(|u| UpdateInfo {
+        version: u.version.clone(),
+        current: u.current_version.clone(),
+        notes: u.body.clone(),
+        date: u.date.map(|d| d.to_string()),
+    }))
+}
+
+#[derive(Clone, serde::Serialize)]
+struct UpdateProgress {
+    received: u64,
+    total: Option<u64>,
+    done: bool,
+}
+
+/// Скачать, установить (тихий режим NSIS) и перезапустить. Прогресс — событием "jitdub-update".
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    use tauri_plugin_updater::UpdaterExt;
+    let Some(update) = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())? else {
+        return Err("обновлений нет".into());
+    };
+    let mut received: u64 = 0;
+    let progress_app = app.clone();
+    let done_app = app.clone();
+    update
+        .download_and_install(
+            move |chunk, total| {
+                received += chunk as u64;
+                let _ = progress_app.emit("jitdub-update", UpdateProgress { received, total, done: false });
+            },
+            move || {
+                let _ = done_app.emit("jitdub-update", UpdateProgress { received: 0, total: None, done: true });
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    app.restart();
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .register_asynchronous_uri_scheme_protocol("jdmedia", |_ctx, request, responder| {
             std::thread::spawn(move || responder.respond(serve_media(request)));
         })
-        .invoke_handler(tauri::generate_handler![pick_save_path, pick_folder, write_file, open_external, reveal, pick_video, file_info, media_dest, download_media, cancel_download])
+        .invoke_handler(tauri::generate_handler![pick_save_path, pick_folder, write_file, open_external, reveal, pick_video, file_info, media_dest, download_media, cancel_download, check_update, install_update])
         .run(tauri::generate_context!())
         .expect("не удалось запустить JitDub");
 }
