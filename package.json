@@ -1,0 +1,14 @@
+{
+  "name": "jitdub-client",
+  "version": "0.1.0",
+  "description": "JitDub — клиент совместной озвучки (Tauri v2 + WebAudio)",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "app": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "app:release": "cargo run --release --manifest-path src-tauri/Cargo.toml",
+    "build": "cargo build --release --manifest-path src-tauri/Cargo.toml",
+    "web": "node dev-server.mjs",
+    "icons": "node scripts/make-icons.mjs"
+  }
+}

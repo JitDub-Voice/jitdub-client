@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>JitDub</title>
+  <link rel="icon" href="icons/jd/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/uikit.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body class="ui-scrollbars">
+<div id="app">
+  <header id="header">
+    <div class="hl">
+      <img class="logo" src="icons/jd/logo.svg" alt="JitDub">
+      <div id="h-left"></div>
+    </div>
+    <div class="hc" id="h-center"></div>
+    <div class="hr" id="h-right"></div>
+  </header>
+
+  <!-- лобби: вход и список проектов -->
+  <main id="lobby" class="screen"></main>
+
+  <!-- студия: сценарий | видео + таймлайн | инспектор, участники, чат -->
+  <main id="studio" class="screen">
+    <section class="panel" id="p-left">
+      <div class="ptabs" id="left-tabs"></div>
+      <div class="pbody" id="left-body"></div>
+    </section>
+    <div class="splitter v" data-split="left"></div>
+    <section id="center">
+      <div class="panel" id="p-video"></div>
+      <div class="splitter h" data-split="timeline"></div>
+      <div class="panel" id="p-timeline"></div>
+    </section>
+    <div class="splitter v" data-split="right"></div>
+    <section class="panel" id="p-right">
+      <div class="insp" id="inspector"></div>
+      <div class="ptabs" id="right-tabs"></div>
+      <div class="pbody" id="right-body"></div>
+    </section>
+  </main>
+
+  <footer id="statusbar"><span id="st-left"></span><span class="grow"></span><span id="st-right"></span></footer>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
