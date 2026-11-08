@@ -13,7 +13,10 @@ export function showAuth(onDone) {
   const name = h('input', { type: 'text', placeholder: 'как вас видят другие (например, Аня)', spellcheck: false });
   const pass = h('input', { type: 'password', placeholder: '••••••', autocomplete: 'current-password' });
   const server = h('input', { type: 'text', value: session.server, spellcheck: false, placeholder: DEFAULT_SERVER });
-  const nameRow = h('div', {}, h('label', {}, 'Имя в проекте'), name);
+  const invite = h('input', { type: 'text', placeholder: 'XXXX-XXXX-XXXX', spellcheck: false, autocomplete: 'off', style: { textTransform: 'uppercase', fontFamily: '"JetBrains Mono", monospace' } });
+  const nameRow = h('div', {},
+    h('label', {}, 'Ключ приглашения'), invite,
+    h('label', {}, 'Имя в проекте'), name);
   const btn = h('button.ui-btn.primary', { type: 'submit' }, 'Войти');
   const seg = h('div.ui-seg', {},
     h('button.on', { type: 'button', onclick: () => setMode('login') }, 'Вход'),
@@ -34,7 +37,7 @@ export function showAuth(onDone) {
       session.server = server.value;
       btn.disabled = true;
       try {
-        const body = { username: user.value.trim(), password: pass.value, displayName: name.value.trim() };
+        const body = { username: user.value.trim(), password: pass.value, displayName: name.value.trim(), inviteCode: invite.value.trim().toUpperCase() };
         const r = await api(mode === 'login' ? '/api/auth/login' : '/api/auth/register', { method: 'POST', body });
         session.token = r.token;
         session.user = r.user;
@@ -52,6 +55,7 @@ export function showAuth(onDone) {
     nameRow,
     h('label', {}, 'Пароль'), pass,
     btn, err,
+    h('div.dim', { style: { fontSize: '12px', lineHeight: '16px', marginTop: '4px' } }, 'Регистрация — по ключу приглашения от администратора сервера.'),
     h('details', {}, h('summary', {}, 'Сервер'), h('div', { style: { marginTop: '6px' } }, server)));
   setMode('login');
   fill(root(), form);

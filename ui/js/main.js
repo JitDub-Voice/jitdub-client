@@ -199,6 +199,7 @@ function userMenu(btn) {
   menuAt(btn, [
     { label: session.user?.username ? `@${session.user.username}` : '', disabled: true },
     { label: 'Профиль и настройки…', icon: 'settings', onClick: openSettings },
+    session.user?.isAdmin ? { label: 'Ключи приглашения…', icon: 'link', onClick: openInvites } : null,
     { label: 'Горячие клавиши', icon: 'help', sc: 'F1', onClick: showHotkeys },
     '-',
     { label: 'Выйти из аккаунта', icon: 'exit', danger: true, onClick: () => logout() },
@@ -397,6 +398,91 @@ function openExport() {
 }
 
 // ---------- настройки ----------
+// ---------- профиль: аватарка ----------
+function applyProfile(user) {
+  session.user = user;
+  const m = doc.members.get(user.id);
+  if (m) Object.assign(m, user);
+  if (doc.you?.id === user.id) Object.assign(doc.you, user);
+  renderHeader();
+  refreshTimeline();
+  docEvents.emit('members');
+}
+
+// обрезка по центру до квадрата 256×256 и сжатие в WebP прямо в клиенте
+async function squareImage(file, size = 256) {
+  const bmp = await createImageBitmap(file);
+  const side = Math.min(bmp.width, bmp.height);
+  const cv = Object.assign(document.createElement('canvas'), { width: size, height: size });
+  const g = cv.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
+  bmp.close?.();
+  return new Promise((res, rej) => cv.toBlob(b => (b ? res(b) : rej(new Error('не удалось сжать картинку'))), 'image/webp', 0.9));
+}
+
+async function uploadAvatar(file) {
+  if (!file.type.startsWith('image/')) { toast('Это не картинка', 'warn'); return; }
+  try {
+    const blob = await squareImage(file);
+    const { user } = await api('/api/me/avatar', { method: 'PUT', body: blob, headers: { 'content-type': blob.type || 'image/webp' } });
+    applyProfile(user);
+    toast('Аватарка обновлена', 'ok', 1500);
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+async function removeAvatar() {
+  try { const { user } = await api('/api/me/avatar', { method: 'DELETE' }); applyProfile(user); } catch (e) { toast(e.message, 'err'); }
+}
+
+// ---------- администратор: ключи приглашения ----------
+async function openInvites() {
+  const list = h('div.inv-list', {}, h('div.dim', {}, 'Загрузка…'));
+  const summary = h('span.dim', { style: { fontSize: '12px' } });
+  const note = h('input', { type: 'text', placeholder: 'для кого (например, Аня — Мира)', spellcheck: false });
+  const uses = h('input', { type: 'number', min: 1, max: 1000, value: 1 });
+  const days = h('input', { type: 'number', min: 0, max: 365, value: 7 });
+  const copy = code => { navigator.clipboard.writeText(code); toast(`Ключ ${code} скопирован`, 'ok', 1500); };
+  const load = async () => {
+    try {
+      const { invites, users } = await api('/api/admin/invites');
+      const active = invites.filter(i => i.active).length;
+      summary.textContent = `Пользователей: ${users} · активных ключей: ${active}`;
+      fill(list, invites.length ? invites.map(i => h(`div.inv${i.active ? '' : '.off'}`, {},
+        h('code', {}, i.code),
+        h('div.meta', { title: i.usedBy.join(', ') },
+          i.note ? h('b', {}, i.note + ' · ') : null,
+          `${i.uses}/${i.maxUses}`,
+          i.revoked ? ' · отозван' : i.expiresAt ? ` · до ${new Date(i.expiresAt).toLocaleDateString('ru-RU')}` : ' · бессрочно',
+          i.usedBy.length ? ` · ${i.usedBy.join(', ')}` : ''),
+        h('button.ui-ib', { 'data-tip': 'Скопировать', onclick: () => copy(i.code), disabled: !i.active }, icon('copy')),
+        h('button.ui-ib', { 'data-tip': 'Отозвать', disabled: !i.active, onclick: async () => { try { await api(`/api/admin/invites/${i.code}`, { method: 'DELETE' }); load(); } catch (e) { toast(e.message, 'err'); } } }, icon('delete'))))
+        : h('div.dim', { style: { padding: '8px 2px' } }, 'Ключей пока нет — создайте первый.'));
+    } catch (e) { fill(list, h('div.dim', {}, e.message)); }
+  };
+  const create = async () => {
+    try {
+      const { invite } = await api('/api/admin/invites', { method: 'POST', body: { note: note.value, maxUses: +uses.value || 1, expiresDays: +days.value || 0 } });
+      copy(invite.code);
+      note.value = '';
+      load();
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  modal({
+    title: 'Ключи приглашения', width: 640,
+    body: h('div', {},
+      h('div.dim', { style: { fontSize: '12px', lineHeight: '16px', marginBottom: '10px' } }, 'Зарегистрироваться на сервере можно только по ключу. Новый ключ сразу копируется — отправьте его актёру.'),
+      h('div.inv-new', {},
+        h('div', {}, h('label', {}, 'Заметка'), note),
+        h('div', {}, h('label', {}, 'Регистраций'), uses),
+        h('div', {}, h('label', {}, 'Дней (0 — бессрочно)'), days),
+        h('button.ui-btn.primary', { onclick: create }, icon('add'), 'Создать')),
+      list, h('div', { style: { marginTop: '8px' } }, summary)),
+    buttons: [{ label: 'Закрыть', primary: true }],
+  });
+  load();
+}
+
 async function openSettings() {
   const inputs = await audio.listInputs();
   const cur = prefs.get('inputDevice', '');
@@ -415,16 +501,32 @@ async function openSettings() {
     return h('label.row', { style: { cursor: 'pointer' } }, c, label);
   };
   const nameIn = h('input', { type: 'text', value: session.user?.displayName || '', spellcheck: false });
-  const colors = ['#3574F0', '#5FAD65', '#E08855', '#955AE0', '#24A394', '#DB5C5C', '#F2C55C', '#E06AA8', '#4FB3D9', '#A3C44E'];
-  let color = session.user?.color;
-  const sw = h('div.swatches', {}, colors.map(c => h(`i${c === color ? '.on' : ''}`, { style: { background: c }, onclick: e => { color = c; [...sw.children].forEach(x => x.classList.remove('on')); e.target.classList.add('on'); } })));
+  const avaBox = h('div.ava-edit');
+  const renderAva = () => {
+    const u = session.user;
+    const drop = h('div.ava-drop', { 'data-tip': 'Нажмите или перетащите картинку', onclick: pickAvatar }, avatar(u, 64));
+    drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) uploadAvatar(f).then(renderAva); });
+    fill(avaBox, drop, h('div.acts', {},
+      h('button.ui-btn.secondary.slim', { onclick: pickAvatar }, icon('upload'), u?.avatar ? 'Сменить…' : 'Загрузить…'),
+      u?.avatar ? h('button.ui-btn.secondary.slim', { onclick: async () => { await removeAvatar(); renderAva(); } }, icon('delete'), 'Убрать') : null,
+      h('span.dim', { style: { fontSize: '11px' } }, 'PNG, JPG, WebP или GIF — обрежется до квадрата')));
+  };
+  const pickAvatar = () => {
+    const inp = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif' });
+    inp.onchange = () => inp.files[0] && uploadAvatar(inp.files[0]).then(renderAva);
+    inp.click();
+  };
+  renderAva();
+  audio.audioCtx(); // чтобы показать реальную выходную задержку
   const lat = audio.outLatency();
   modal({
     title: 'Настройки', width: 620,
     body: h('div.col', {},
       h('div.t-def-sb', {}, 'Профиль'),
       h('div.f', {}, h('label', {}, 'Имя'), nameIn),
-      h('div.f', {}, h('label', {}, 'Цвет'), sw),
+      h('div.f', {}, h('label', {}, 'Аватарка'), avaBox),
       h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Запись'),
       h('div.f', {}, h('label', {}, 'Микрофон'), devSel),
       h('div.f', {}, h('label', {}, 'Задержка входа'), num('inputLatencyMs', 20, { min: -500, max: 1000, step: 1, suffix: `мс + выход ${(lat * 1000).toFixed(0)} мс (авто)` })),
@@ -443,15 +545,10 @@ async function openSettings() {
     buttons: [{ label: 'Готово', primary: true, onClick: async close => {
       close();
       const displayName = nameIn.value.trim();
-      if (session.user && (displayName !== session.user.displayName || color !== session.user.color)) {
+      if (session.user && displayName && displayName !== session.user.displayName) {
         try {
-          const { user } = await api('/api/me', { method: 'PATCH', body: { displayName, color } });
-          session.user = user;
-          const m = doc.members.get(user.id);
-          if (m) Object.assign(m, user);
-          if (doc.you) Object.assign(doc.you, { displayName: user.displayName, color: user.color });
-          renderHeader();
-          refreshTimeline();
+          const { user } = await api('/api/me', { method: 'PATCH', body: { displayName } });
+          applyProfile(user);
         } catch (e) { toast(e.message, 'err'); }
       }
     } }],

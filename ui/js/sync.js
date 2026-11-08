@@ -218,6 +218,15 @@ function onMessage(m) {
       doc.members.set(m.member.id, m.member);
       events.emit('members');
       break;
+    case 'profile': {
+      // участник сменил имя или аватарку — роль в проекте сохраняем
+      const u = doc.members.get(m.user.id);
+      doc.members.set(m.user.id, { ...(u || { role: 'editor' }), ...m.user });
+      if (doc.you?.id === m.user.id) Object.assign(doc.you, m.user);
+      events.emit('members');
+      events.emit('profile', m.user);
+      break;
+    }
     case 'memberLeft':
       doc.members.delete(m.userId);
       events.emit('members');

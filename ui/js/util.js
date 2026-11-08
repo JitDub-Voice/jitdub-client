@@ -1,4 +1,5 @@
 // DOM-помощники, форматирование времени, мелкие утилиты.
+import { session } from './api.js';
 
 export function h(tag, attrs = {}, ...kids) {
   // 'tag.класс.класс#id'
@@ -87,9 +88,17 @@ export function initials(name) {
   return ((p[0]?.[0] || '?') + (p[1]?.[0] || '')).toUpperCase();
 }
 
+// Аватарка: картинка с сервера, если загружена, иначе инициалы на служебном цвете пользователя
 export function avatar(user, size = 22) {
-  const e = h('span.avatar', { title: user?.displayName || '' }, initials(user?.displayName));
+  const e = h('span.avatar', { title: user?.displayName || '' });
   e.style.cssText = `--c:${user?.color || '#5A5D63'};width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px`;
+  if (user?.avatar) {
+    const img = h('img', { src: (user.avatar.startsWith('/') ? session.server : '') + user.avatar, alt: '', draggable: false, loading: 'lazy' });
+    img.addEventListener('error', () => { img.remove(); e.textContent = initials(user.displayName); });
+    e.append(img);
+  } else {
+    e.textContent = initials(user?.displayName);
+  }
   return e;
 }
 
