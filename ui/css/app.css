@@ -341,3 +341,17 @@ body.s-studio #studio { display: grid; }
 .jd-tip { position: fixed; z-index: 1000; pointer-events: none; }
 .kbd-list { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; }
 .kbd-list kbd { font: 11px/18px "JetBrains Mono", monospace; padding: 0 6px; border-radius: 4px; background: var(--p-gray-4); white-space: nowrap; justify-self: start; }
+.vtop button.pill { border: 0; cursor: pointer; height: 24px; }
+.vtop button.pill:hover { background: #000d; color: #fff; }
+.vtop .pill.duck { color: #fff; }
+/* видео на сервере: загрузка / скачивание */
+.vprog { display: flex; flex-direction: column; align-items: center; gap: 6px; width: min(360px, 80%); }
+.vprog .bar { width: 100%; height: 6px; border-radius: 3px; background: #ffffff22; overflow: hidden; }
+.vprog .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.vprog span { font-size: 12px; color: var(--dim); }
+.vtop .pill.vprog { flex-direction: row; width: auto; gap: 8px; }
+.vtop .pill.vprog .bar { width: 90px; }
+.vtop .pill.vprog span { color: #ddd; white-space: nowrap; }
+.vtop button.pill.up { background: var(--p-blue-6); color: #fff; }
+.vtop button.pill.up:hover { background: var(--p-blue-7); }
+.vtop .pill a { color: #9cc0ff; }

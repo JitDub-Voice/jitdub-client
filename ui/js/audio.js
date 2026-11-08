@@ -20,6 +20,7 @@ export function audioCtx() {
   return ctx;
 }
 
+export const masterNode = () => { audioCtx(); return master; };
 export function setMasterGain(v) { audioCtx(); master.gain.value = v; prefs.set('masterGain', v); }
 export const masterGain = () => prefs.get('masterGain', 1);
 
@@ -94,6 +95,92 @@ export function position() {
 
 export function setVideo(el) { T.video = el; }
 
+// ---------- звук оригинала (видео) через WebAudio ----------
+// Режимы под репликами озвучки (там, где на слышимых дорожках есть клипы):
+//   off  — оригинал как есть
+//   duck — закадр: оригинал приглушается на duckDb
+//   cut  — дубляж: голоса оригинала вырезаются (центр стерео убирается, музыка и шумы по краям остаются),
+//          бас ниже 150 Гц сохраняется
+export const DUCK_MODES = { off: 'Без приглушения', duck: 'Закадр — приглушать оригинал', cut: 'Дубляж — вырезать голоса оригинала' };
+const O = { src: null, normal: null, cut: null, out: null, el: null };
+export const duckMode = () => prefs.get('duckMode', 'duck');
+const duckGain = () => 10 ** (Number(prefs.get('duckDb', -14)) / 20);
+const origLevel = () => (prefs.get('origMuted', false) || O.recMute ? 0 : Number(prefs.get('origVolume', 0.8)));
+
+export function attachOriginal() {
+  const v = T.video;
+  if (!v || O.el === v) return;
+  audioCtx();
+  try { O.src = ctx.createMediaElementSource(v); } catch (e) { console.warn('оригинал без WebAudio:', e); return; }
+  O.el = v;
+  v.volume = 1; v.muted = false; // громкость теперь у узла O.out
+  O.out = ctx.createGain(); O.out.gain.value = origLevel(); O.out.connect(master);
+  O.normal = ctx.createGain(); O.src.connect(O.normal).connect(O.out);
+  // вырезка центра: side = (L − R) / 2, плюс бас из mid
+  const split = ctx.createChannelSplitter(2);
+  O.src.connect(split);
+  const gl = ctx.createGain(), gr = ctx.createGain(), side = ctx.createGain();
+  gl.gain.value = 0.5; gr.gain.value = -0.5; side.gain.value = 1.6;
+  split.connect(gl, 0); split.connect(gr, 1); gl.connect(side); gr.connect(side);
+  const ml = ctx.createGain(), mr = ctx.createGain(), lp = ctx.createBiquadFilter();
+  ml.gain.value = 0.5; mr.gain.value = 0.5; lp.type = 'lowpass'; lp.frequency.value = 150;
+  split.connect(ml, 0); split.connect(mr, 1); ml.connect(lp); mr.connect(lp);
+  O.cut = ctx.createGain(); O.cut.gain.value = 0;
+  side.connect(O.cut); lp.connect(O.cut); O.cut.connect(O.out);
+  events.emit('original');
+}
+export const originalRouted = () => !!O.out;
+// для отладки и индикации: текущие уровни путей оригинала
+export const originalGains = () => (O.out ? { normal: +O.normal.gain.value.toFixed(3), cut: +O.cut.gain.value.toFixed(3), out: +O.out.gain.value.toFixed(3), segments: voiceSegments() } : null);
+
+function applyOrigLevel() {
+  if (O.out) O.out.gain.setTargetAtTime(origLevel(), ctx.currentTime, 0.02);
+  else if (T.video) { T.video.volume = Number(prefs.get('origVolume', 0.8)); T.video.muted = !!prefs.get('origMuted', false); }
+}
+export function setOrigVolume(v) { prefs.set('origVolume', v); applyOrigLevel(); }
+export function setOrigMuted(m) { prefs.set('origMuted', !!m); applyOrigLevel(); events.emit('original'); }
+export function setDuckMode(m) { prefs.set('duckMode', m); scheduleDuck(); events.emit('original'); }
+
+// отрезки, где звучит озвучка (с учётом mute/solo), слитые с зазором
+function voiceSegments() {
+  const play = playableTracks();
+  const segs = byKind('clip').filter(c => play.has(c.trackId) && !c.mute).map(c => [c.start, c.start + c.duration]).sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const [a, b] of segs) {
+    const last = out[out.length - 1];
+    if (last && a - last[1] < 0.45) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+
+// огибающая приглушения оригинала по времени контекста (from — позиция таймлайна в момент now)
+function scheduleDuck(from = position(), now = ctx ? Math.max(ctx.currentTime, T.startCtx) : 0) {
+  if (!O.normal) return;
+  const t = ctx.currentTime;
+  const mode = duckMode();
+  const base = [1, 0];
+  const during = mode === 'cut' ? [0, 1] : mode === 'duck' ? [duckGain(), 0] : base;
+  const params = [O.normal.gain, O.cut.gain];
+  params.forEach((p, i) => { p.cancelScheduledValues(0); p.setValueAtTime(p.value, t); });
+  if (!T.playing || mode === 'off') { params.forEach((p, i) => p.linearRampToValueAtTime(base[i], t + 0.05)); return; }
+  const ATT = 0.12, REL = 0.3;
+  let inside = false;
+  for (const [a, b] of voiceSegments()) {
+    if (b + REL <= from) continue;
+    const ta = now + (a - from), tb = now + (b - from);
+    if (a - ATT <= from) {
+      if (!inside) params.forEach((p, i) => p.linearRampToValueAtTime(during[i], t + 0.04));
+      inside = true;
+    } else {
+      params.forEach((p, i) => { p.setValueAtTime(base[i], ta - ATT); p.linearRampToValueAtTime(during[i], ta); });
+    }
+    params.forEach((p, i) => { p.setValueAtTime(during[i], Math.max(t + 0.05, tb)); p.linearRampToValueAtTime(base[i], Math.max(t + 0.05, tb) + REL); });
+  }
+  if (!inside) params.forEach((p, i) => { if (p.value !== base[i]) p.linearRampToValueAtTime(base[i], t + 0.05); });
+}
+
+
 export function projectEnd() {
   let end = doc.project?.video?.duration || 0;
   for (const it of doc.items.values()) {
@@ -118,6 +205,10 @@ function clipGainAt(c, x) {
   return g * k;
 }
 
+// Микрофейды на любом краю звука (начало/конец клипа, старт с середины, стоп): без них резкий обрыв волны
+// слышен как тихий щелчок. 8 мс на слух не заметны, а щелчки убирают полностью.
+const EDGE = 0.008;
+
 // Ставит клип в контекст c: from — позиция таймлайна, соответствующая времени now; dest — узел дорожки
 function scheduleClip(c, clip, buffer, from, now, dest) {
   const end = clip.start + clip.duration;
@@ -125,19 +216,28 @@ function scheduleClip(c, clip, buffer, from, now, dest) {
   const skip = Math.max(0, from - clip.start);
   const when = now + Math.max(0, clip.start - from);
   const off = (clip.offset || 0) + skip;
-  const dur = clip.duration - skip;
-  if (dur <= 0 || off >= buffer.duration) return null;
+  const dur = Math.min(clip.duration - skip, buffer.duration - off);
+  if (dur <= 0.001) return null;
   const src = c.createBufferSource();
   src.buffer = buffer;
   const g = c.createGain();
-  // фейды: точки огибающей по времени контекста
-  g.gain.setValueAtTime(clipGainAt(clip, skip), when);
+  const edge = Math.min(EDGE, dur / 3);
+  const tEnd = when + dur;
+  // огибающая: точки (x — секунды от начала клипа) с фейдами клипа, плюс микрофейды по краям
   const pts = [];
   if (clip.fadeIn > 0 && skip < clip.fadeIn) pts.push(clip.fadeIn);
-  if (clip.fadeOut > 0) { const fo = clip.duration - clip.fadeOut; if (fo > skip) pts.push(fo); pts.push(clip.duration); }
-  for (const x of pts.sort((a, b) => a - b)) if (x > skip) g.gain.linearRampToValueAtTime(clipGainAt(clip, x), when + (x - skip));
+  if (clip.fadeOut > 0) { const fo = clip.duration - clip.fadeOut; if (fo > skip) pts.push(fo); }
+  g.gain.setValueAtTime(0, when);
+  g.gain.linearRampToValueAtTime(clipGainAt(clip, skip + edge), when + edge);
+  for (const x of pts.sort((a, b) => a - b)) {
+    const t = when + (x - skip);
+    if (t > when + edge && t < tEnd - edge) g.gain.linearRampToValueAtTime(clipGainAt(clip, x), t);
+  }
+  g.gain.linearRampToValueAtTime(clipGainAt(clip, skip + dur - edge), tEnd - edge);
+  g.gain.linearRampToValueAtTime(0, tEnd);
   src.connect(g).connect(dest);
   src.start(when, off, dur);
+  src.fadeNode = g;
   return src;
 }
 
@@ -154,8 +254,18 @@ function trackNode(t) {
   return n;
 }
 
+// остановка с коротким затуханием (без щелчка)
 function stopSources() {
-  for (const s of T.sources) { try { s.stop(); } catch {} s.disconnect(); }
+  if (!ctx) { T.sources = []; return; }
+  const t = ctx.currentTime;
+  for (const s of T.sources) {
+    const g = s.fadeNode;
+    try {
+      if (g) { g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(g.gain.value, t); g.gain.linearRampToValueAtTime(0, t + 0.012); }
+      s.stop(t + 0.015);
+    } catch {}
+    s.onended = () => { s.disconnect(); g?.disconnect(); };
+  }
   T.sources = [];
 }
 
@@ -172,12 +282,15 @@ function scheduleAll() {
     const s = scheduleClip(ctx, clip, data.buffer, from, now, trackNode(tmap.get(clip.trackId)).gain);
     if (s) T.sources.push(s);
   }
+  scheduleDuck(from, now);
 }
 const reschedule = debounce(() => { if (T.playing) scheduleAll(); }, 30);
 
 export function play(from = position()) {
   audioCtx();
+  T.stopAt = null;
   T.startPos = Math.max(0, from);
+  T.returnPos = T.startPos;
   T.startCtx = ctx.currentTime + 0.06; // небольшой запас, чтобы первые клипы не обрезались
   T.playing = true;
   // источники ставим относительно startCtx: position() до него = startPos
@@ -191,6 +304,7 @@ export function play(from = position()) {
     const s = scheduleClip(ctx, clip, data.buffer, T.startPos, T.startCtx, trackNode(tmap.get(clip.trackId)).gain);
     if (s) T.sources.push(s);
   }
+  scheduleDuck(T.startPos, T.startCtx);
   if (T.video) {
     T.video.currentTime = Math.max(0, T.startPos - outLatency());
     T.video.playbackRate = 1;
@@ -205,12 +319,58 @@ export function pause() {
   T.pos = position();
   T.playing = false;
   stopSources();
+  T.stopAt = null;
+  scheduleDuck();
   if (T.video) { T.video.pause(); T.video.currentTime = T.pos; }
   if (rec.active) stopRecording();
   events.emit('transport');
 }
 
-export function toggle() { T.playing ? pause() : play(); }
+// Стоп: пауза и (по настройке, по умолчанию да) возврат плейхеда туда, откуда начали играть — как в Audition
+export function stop() {
+  if (!T.playing) return;
+  const back = T.returnPos;
+  pause();
+  if (prefs.get('returnOnStop', true) && back != null) seek(back);
+}
+
+export function toggle() { T.playing ? stop() : play(); }
+
+// ---------- скраб: короткий кусочек звука под курсором при перетаскивании ----------
+let scrubSrcs = [];
+let scrubAt = 0;
+// exclude — id клипов, которые сейчас тянут (их старое место не звучит);
+// extra — клип, чей звук нужен прямо под краем подрезки (даже за его текущими границами)
+export function scrub(t, { exclude = null, extra = null } = {}) {
+  if (T.playing || !prefs.get('scrubAudio', true)) return;
+  const now = performance.now();
+  if (now - scrubAt < 55) return;
+  scrubAt = now;
+  audioCtx();
+  for (const s of scrubSrcs) { try { s.stop(); } catch {} }
+  scrubSrcs = [];
+  const play = playableTracks();
+  const tmap = new Map(tracks().map(tr => [tr.id, tr]));
+  const LEN = 0.07, c0 = ctx.currentTime + 0.005;
+  const list = byKind('clip').filter(c => !exclude?.has?.(c.id) && !(exclude?.includes?.(c.id)));
+  if (extra) list.push({ ...extra, start: extra.start - extra.offset, offset: 0, duration: Infinity, _extra: true });
+  for (const clip of list) {
+    if (clip.mute || !play.has(clip.trackId) || t < clip.start || t >= clip.start + clip.duration) continue;
+    const d = takeData(clip.takeId);
+    if (!d || (clip.offset || 0) + (t - clip.start) >= d.buffer.duration) continue;
+    const src = ctx.createBufferSource();
+    src.buffer = d.buffer;
+    const g = ctx.createGain();
+    const v = (clip.gain ?? 1);
+    g.gain.setValueAtTime(0, c0);
+    g.gain.linearRampToValueAtTime(v, c0 + 0.01);
+    g.gain.setValueAtTime(v, c0 + LEN - 0.015);
+    g.gain.linearRampToValueAtTime(0, c0 + LEN);
+    src.connect(g).connect(trackNode(tmap.get(clip.trackId)).gain);
+    src.start(c0, (clip.offset || 0) + (t - clip.start), LEN);
+    scrubSrcs.push(src);
+  }
+}
 
 export function seek(t) {
   t = Math.max(0, t);
@@ -235,8 +395,16 @@ function tick() {
   }
   if (rec.active && rec.autoStop != null && p >= rec.autoStop) stopRecording();
   if (T.loop && p >= T.loop.b && !rec.active) { play(T.loop.a); return; }
+  if (T.stopAt != null && p >= T.stopAt && !rec.active) { const back = T.stopBack; pause(); if (back != null) seek(back); return; }
   events.emit('tick', p);
   requestAnimationFrame(tick);
+}
+
+// проиграть отрезок и остановиться (прослушать дубль); back — куда вернуть плейхед
+export function playRange(a, b, back = null) {
+  play(Math.max(0, a));
+  T.stopAt = b;
+  T.stopBack = back;
 }
 
 export function setLoop(a, b) { T.loop = a != null && b > a ? { a, b } : null; events.emit('transport'); }
@@ -321,7 +489,7 @@ export async function startRecording({ trackId, cueId = null, punchIn = position
   rec.cueId = cueId;
   rec.autoStop = autoStop;
   rec.active = true;
-  if (prefs.get('muteOriginalOnRec', false) && T.video) { rec.videoVol = T.video.muted; T.video.muted = true; }
+  if (prefs.get('muteOriginalOnRec', false)) { O.recMute = true; applyOrigLevel(); }
   play(Math.max(0, punchIn - preroll));
   // кадр контекста, начиная с которого звук попадает в дубль
   rec.punchPos = punchIn;
@@ -337,11 +505,11 @@ export function stopRecording() {
   const info = { trackId: rec.trackId, cueId: rec.cueId };
   const done = new Promise(r => { rec.doneResolve = r; });
   rec.node.port.postMessage({ rec: false });
-  if (T.video && rec.videoVol !== undefined) { T.video.muted = rec.videoVol; rec.videoVol = undefined; }
+  if (O.recMute) { O.recMute = false; applyOrigLevel(); }
   events.emit('record', null);
   const result = (async () => {
     await Promise.race([done, new Promise(r => setTimeout(r, 500))]);
-    if (T.playing) pause();
+    if (T.playing) stop(); // после записи плейхед возвращается к началу — удобно сразу переписать
     const sr = ctx.sampleRate;
     const startFrame = Math.round(rec.punchCtx * sr);
     // склейка блоков, отрезаем всё до punchIn

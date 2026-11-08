@@ -51,10 +51,14 @@ function applyOp(op, changed) {
     case 'batch':
       for (const o of op.ops) applyOp(o, changed);
       break;
-    case 'project':
-      Object.assign(doc.project, op.data);
+    case 'project': {
+      // видео сливаем, как и сервер: его поля (stored и т.п.) не затираются метаданными клиента
+      const { video, ...rest } = op.data;
+      Object.assign(doc.project, rest);
+      if (video) doc.project.video = { ...(doc.project.video || {}), ...video };
       changed.project = true;
       break;
+    }
   }
 }
 

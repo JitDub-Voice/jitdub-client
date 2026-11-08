@@ -7,6 +7,7 @@ import { ui, uiEvents, select, selected, arm } from './ui.js';
 import { menu, toast, confirm, select as dd } from './kit.js';
 import { api, session } from './api.js';
 import { allCharacterNames } from './script.js';
+import { scrollToTime } from './timeline.js';
 
 let el = {};
 let tab = 'people';
@@ -316,7 +317,8 @@ function renderTakes() {
     return h(`div.take${used.has(t.id) ? '' : '.unused'}`, {
       draggable: true,
       ondragstart: e => { e.dataTransfer.setData('application/x-jitdub-take', t.id); e.dataTransfer.effectAllowed = 'copy'; },
-      ondblclick: () => previewTake(t),
+      onclick: e => { if (!e.target.closest('button')) goToTake(t); },
+      ondblclick: e => { if (!e.target.closest('button')) previewTake(t); },
       oncontextmenu: e => {
         e.preventDefault();
         menu(e.clientX, e.clientY, [
@@ -329,21 +331,44 @@ function renderTakes() {
     },
       avatar(u, 22),
       h('div.nm', {}, t.name || `Дубль ${u.displayName}`, h('small', {}, `${t.duration.toFixed(1)} с · ${timeAgo(t.createdAt)}${used.has(t.id) ? '' : ' · не на таймлайне'}`)),
-      h('button.ui-ib', { 'data-tip': 'Прослушать', onclick: () => previewTake(t) }, icon('play')));
+      h(`button.ui-ib${preview?.id === t.id ? '.on' : ''}`, { 'data-tip': preview?.id === t.id ? 'Остановить' : 'Прослушать', onclick: () => previewTake(t) }, icon(preview?.id === t.id ? 'stop' : 'play')));
   })));
 }
 
-let preview = null;
+// клик по дублю: выделить его клип на таймлайне и перейти к нему (повторный клик — к следующему клипу этого дубля)
+function goToTake(t) {
+  const clips = byKind('clip').filter(c => c.takeId === t.id).sort((a, b) => (a.mute - b.mute) || (a.start - b.start));
+  if (!clips.length) { toast('Этого дубля нет на таймлайне — перетащите его на дорожку или дважды кликните, чтобы прослушать', 'info'); return; }
+  const cur = clips.findIndex(c => ui.sel.has(c.id));
+  const c = clips[(cur + 1) % clips.length];
+  select(c.id);
+  audio.seek(c.start);
+  scrollToTime(c.start);
+}
+
+// прослушивание дубля: повторный клик по тому же дублю — стоп
+let preview = null; // { id, src }
+export function stopPreview() {
+  if (!preview) return;
+  const p = preview;
+  preview = null;
+  try { p.src.onended = null; p.src.stop(); } catch {}
+  if (tab === 'takes') renderBody();
+}
 async function previewTake(t) {
+  const same = preview?.id === t.id;
+  stopPreview();
+  if (same) return;
   try {
-    preview?.stop();
+    if (audio.isPlaying()) audio.pause();
     const { buffer } = await audio.loadTake(t.id);
-    const c = audio.audioCtx();
-    const s = c.createBufferSource();
+    const s = audio.audioCtx().createBufferSource();
     s.buffer = buffer;
-    s.connect(c.destination);
+    s.connect(audio.masterNode());
+    s.onended = () => { if (preview?.src === s) { preview = null; if (tab === 'takes') renderBody(); } };
     s.start();
-    preview = s;
+    preview = { id: t.id, src: s };
+    if (tab === 'takes') renderBody();
   } catch (e) { toast(e.message, 'err'); }
 }
 

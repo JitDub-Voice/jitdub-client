@@ -21,6 +21,8 @@ const remoteEls = new Map(); // sid → { line, flag }
 let rows = [];               // [{ kind: 'cues'|'track', id, y, h }]
 let renderQueued = false;
 let drag = null;
+let followPaused = false;   // пользователь сам прокрутил таймлайн во время воспроизведения
+let autoScrollX = -1;        // последняя прокрутка, сделанная следованием (её не считаем ручной)
 
 export function mountTimeline(root) {
   const zoom = h('input.zoom', { type: 'range', min: 0, max: 100, step: 1, value: ppsToSlider(pps), oninput: e => setPps(sliderToPps(+e.target.value)) });
@@ -54,8 +56,11 @@ export function mountTimeline(root) {
 
   el.lanes.addEventListener('scroll', () => {
     el.heads.scrollTop = el.lanes.scrollTop;
+    if (el.lanes.scrollLeft !== autoScrollX && audio.isPlaying()) followPaused = true;
     drawRuler();
   });
+  // колесо/полоса прокрутки во время воспроизведения — пользователь смотрит в другое место, не дёргаем вид
+  el.lanes.addEventListener('wheel', () => { if (audio.isPlaying()) followPaused = true; }, { passive: true });
   el.lanes.addEventListener('wheel', onWheel, { passive: false });
   el.ruler.addEventListener('wheel', onWheel, { passive: false });
   el.heads.addEventListener('wheel', e => { el.lanes.scrollTop += e.deltaY; e.preventDefault(); }, { passive: false });
@@ -78,7 +83,7 @@ export function mountTimeline(root) {
   audio.events.on('take', queue);
   audio.events.on('tick', onTick);
   audio.events.on('seek', onTick);
-  audio.events.on('transport', () => { onTick(audio.position()); renderLoop(); });
+  audio.events.on('transport', () => { followPaused = false; onTick(audio.position()); renderLoop(); });
   audio.events.on('record', queue);
   syncButtons();
 }
@@ -133,7 +138,7 @@ const rowAt = y => rows.find(r => y >= r.y && y < r.y + r.h) || null;
 
 let afterRender = [];
 function queue(fn) {
-  if (fn) afterRender.push(fn);
+  if (typeof fn === 'function') afterRender.push(fn); // обработчики событий передают сюда свои аргументы — их игнорируем
   if (renderQueued) return;
   renderQueued = true;
   requestAnimationFrame(() => {
@@ -388,9 +393,9 @@ function onTick(t) {
   const x = t * pps;
   el.playhead.style.left = x + 'px';
   el.playhead.classList.toggle('rec', !!audio.recording());
-  if (audio.isPlaying() && ui.follow && !drag) {
+  if (audio.isPlaying() && ui.follow && !drag && !followPaused) {
     const L = el.lanes.scrollLeft, W = el.lanes.clientWidth;
-    if (x > L + W - 40 || x < L) el.lanes.scrollLeft = x - 60;
+    if (x > L + W - 40 || x < L) { el.lanes.scrollLeft = x - 60; autoScrollX = el.lanes.scrollLeft; }
   }
   drawRulerHead(t);
   sendPos(t);
@@ -460,7 +465,7 @@ function onRulerDown(e) {
     return;
   }
   audio.seek(snapTime(t0, null, true));
-  const move = ev => audio.seek(timeAtClient(ev.clientX));
+  const move = ev => { const t = timeAtClient(ev.clientX); audio.seek(t); audio.scrub(t); };
   const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); };
   addEventListener('pointermove', move); addEventListener('pointerup', up);
 }
@@ -558,6 +563,7 @@ function startMove(e, t0, y0) {
     if (s !== lead.start + dt) dt = s - lead.start;
     else { const se = snapTime(lead.start + dt + leadEnd, ids); dt = se - leadEnd - lead.start; }
     dt = Math.max(-minStart, dt);
+    follow(lead.start + dt, { exclude: ids });
     const row = rowAt(ev.clientY - r.top);
     const fromRow = rowAt(y0);
     if (row?.kind === 'track' && fromRow?.kind === 'track') dRow = trackList.findIndex(x => x.id === row.id) - trackList.findIndex(x => x.id === fromRow.id);
@@ -594,6 +600,13 @@ function startMove(e, t0, y0) {
 
 const round = v => Math.round(v * 1000) / 1000;
 
+// при перетаскивании плейхед (а с ним кадр видео) встаёт туда, где край, и звучит кусочек под ним
+function follow(t, opts) {
+  if (audio.isPlaying()) return;
+  audio.seek(t);
+  audio.scrub(t, opts);
+}
+
 function startTrim(e, item, edge) {
   const o = { ...item };
   const ids = new Set([item.id]);
@@ -613,9 +626,12 @@ function startTrim(e, item, edge) {
       }
       const tr = tracks().find(x => x.id === o.trackId);
       placeClip(clipEls.get(item.id), { ...o, ...res }, rowOf(o.trackId).y, tr);
+      const edgeT = edge === 'l' ? res.start : o.start + res.duration;
+      follow(edgeT, { exclude: ids, extra: o });
     } else {
       res = edge === 'l' ? { start: round(Math.min(t, o.end - 0.05)) } : { end: round(Math.max(t, o.start + 0.05)) };
       placeCue(cueEls.get(item.id), { ...o, ...res });
+      follow(res.start ?? res.end);
     }
   };
   const up = () => {

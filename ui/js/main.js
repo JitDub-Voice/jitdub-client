@@ -118,7 +118,7 @@ function renderHeader() {
     h('button', { 'data-tip': 'В начало (Home)', onclick: () => audio.seek(0) }, icon('toStart')),
     h('button', { 'data-tip': 'Предыдущая реплика (↑)', onclick: () => jumpCue(-1) }, icon('back')),
     hdr.play,
-    h('button', { 'data-tip': 'Стоп', onclick: () => { audio.recording() ? audio.stopRecording() : audio.pause(); } }, icon('stop')),
+    h('button', { 'data-tip': 'Стоп — плейхед вернётся к месту старта', onclick: () => { audio.recording() ? audio.stopRecording() : audio.stop(); } }, icon('stop')),
     hdr.rec,
     h('button', { 'data-tip': 'Следующая реплика (↓)', onclick: () => jumpCue(1) }, icon('fwd')),
     hdr.loop,
@@ -281,12 +281,18 @@ audio.events.on('recorded', async r => {
     doc.takes.set(take.id, take);
     audio.cacheTake(take.id, r.buffer);
     const id = uid('k');
+    const a = round(r.start), b = round(r.start + r.duration);
+    const replaced = byKind('clip').filter(c => c.trackId === r.trackId && !c.mute &&
+      ((r.cueId && c.cueId === r.cueId) || (c.start >= a - 0.05 && c.start + c.duration <= b + 0.05)));
     sync.batch([
-      { type: 'add', kind: 'clip', id, data: { trackId: r.trackId, takeId: take.id, start: round(r.start), offset: round(r.offset), duration: round(r.duration), gain: 1, fadeIn: 0, fadeOut: 0, name: q ? name : '', cueId: r.cueId || null, mute: false } },
+      ...replaced.map(c => ({ type: 'update', id: c.id, data: { mute: true } })),
+      { type: 'add', kind: 'clip', id, data: { trackId: r.trackId, takeId: take.id, start: a, offset: round(r.offset), duration: round(r.duration), gain: 1, fadeIn: 0, fadeOut: 0, name: q ? name : '', cueId: r.cueId || null, mute: false } },
       q && (q.status === 'todo' || q.status === 'redo') ? { type: 'update', id: q.id, data: { status: 'recorded', assigneeId: q.assigneeId || doc.you.id } } : null,
     ], { label: 'запись' });
     select(id);
-    toast(`Дубль записан: ${r.duration.toFixed(1)} с`, 'ok', 2000);
+    lastClipId = id;
+    toast(`Дубль записан: ${r.duration.toFixed(1)} с${replaced.length ? ` · прошлый дубль заглушён (${replaced.length})` : ''} · P — прослушать`, 'ok', 3000);
+    if (prefs.get('autoReview', false)) reviewLast();
   };
   try {
     await upload();
@@ -303,6 +309,23 @@ audio.events.on('recorded', async r => {
   }
 });
 const round = v => Math.round(v * 1000) / 1000;
+
+// P — прослушать последний записанный (или выбранный) клип с секундой до и после, плейхед вернётся назад
+let lastClipId = null;
+function reviewLast() {
+  const sel = [...ui.sel].map(id => doc.items.get(id)).find(i => i?.kind === 'clip');
+  const c = sel || doc.items.get(lastClipId);
+  if (!c) { toast('Нет дубля для прослушивания — выберите клип', 'info'); return; }
+  const back = audio.position();
+  audio.playRange(Math.max(0, c.start - 1), c.start + c.duration + 0.5, back);
+}
+
+function cycleDuck() {
+  const modes = Object.keys(audio.DUCK_MODES);
+  const next = modes[(modes.indexOf(audio.duckMode()) + 1) % modes.length];
+  audio.setDuckMode(next);
+  toast(audio.DUCK_MODES[next], 'info', 1500);
+}
 
 // обратный отсчёт во время преролла записи реплики
 audio.events.on('tick', t => {
@@ -536,7 +559,14 @@ async function openSettings() {
       h('div.f', {}, h('label', {}, 'Преролл свободной записи'), num('freePreroll', 0, { min: 0, max: 10, step: 0.5, suffix: 'с (клавиша R)' })),
       h('div.f', {}, h('label', {}, ''), chk('monitor', false, 'Слышать себя в наушниках (мониторинг входа)', v => audio.setMonitor(v))),
       h('div.f', {}, h('label', {}, ''), chk('muteOriginalOnRec', false, 'Глушить оригинал во время записи (если пишете без наушников)')),
+      h('div.f', {}, h('label', {}, ''), chk('autoReview', false, 'Сразу прослушать дубль после записи')),
+      h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Оригинал под озвучкой'),
+      h('div.f', {}, h('label', {}, 'Режим'), dd(audio.duckMode(), Object.entries(audio.DUCK_MODES).map(([value, label]) => ({ value, label })), v => audio.setDuckMode(v), { width: '100%' })),
+      h('div.f', {}, h('label', {}, 'Приглушение (закадр)'), num('duckDb', -14, { min: -40, max: 0, step: 1, suffix: 'дБ' })),
+      h('div.hint', {}, 'Закадр — оригинал тише, пока звучит голос дабера. Дубляж — из оригинала вырезается центр стерео (обычно там голоса), музыка и шумы остаются. Переключение — клавиша D.'),
       h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Интерфейс'),
+      h('div.f', {}, h('label', {}, ''), chk('returnOnStop', true, 'После стопа возвращать плейхед к месту старта')),
+      h('div.f', {}, h('label', {}, ''), chk('scrubAudio', true, 'Звук под курсором при перетаскивании (скраб)')),
       h('div.f', {}, h('label', {}, ''), chk('showSubs', true, 'Показывать текст реплики поверх видео', () => refreshTimeline())),
       h('div.f', {}, h('label', {}, 'Скорость ленты ритмо'), num('rythmoSpeed', 160, { min: 40, max: 600, step: 10, suffix: 'пикс/с' })),
       h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Сервер'),
@@ -557,9 +587,9 @@ async function openSettings() {
 
 function showHotkeys() {
   const rows = [
-    ['Пробел', 'Играть / пауза (во время записи — стоп)'], ['R', 'Запись на свою дорожку с плейхеда'], ['Shift+R', 'Записать выбранную реплику (преролл, автостоп)'],
+    ['Пробел', 'Играть / стоп с возвратом к месту старта (во время записи — стоп)'], ['Shift+Пробел', 'Пауза на месте, без возврата'], ['R', 'Запись на свою дорожку с плейхеда'], ['Shift+R', 'Записать выбранную реплику (преролл, автостоп)'],
     ['↑ / ↓', 'Предыдущая / следующая реплика'], ['← / →', 'Плейхед ±1 с (Shift — ±5 с)'], ['Home / End', 'В начало / в конец'],
-    ['Enter', 'Прослушать выбранную реплику'], ['L', 'Повтор выбранного'], ['S', 'Разрезать клип по плейхеду'], ['M', 'Маркер'],
+    ['Enter', 'Прослушать выбранную реплику'], ['P', 'Прослушать последний / выбранный дубль'], ['D', 'Оригинал под озвучкой: закадр / дубляж / как есть'], ['L', 'Повтор выбранного'], ['S', 'Разрезать клип по плейхеду'], ['M', 'Маркер'],
     ['Delete', 'Удалить выбранное'], ['Ctrl+Z / Ctrl+Shift+Z', 'Отменить / повторить свои действия'], ['Ctrl+колесо, + / −', 'Масштаб таймлайна'],
     ['Shift+протяжка по линейке', 'Диапазон повтора'], ['Ctrl+E', 'Экспорт'], ['Ctrl+,', 'Настройки'],
   ];
@@ -567,11 +597,23 @@ function showHotkeys() {
 }
 
 // ---------- клавиатура ----------
+// клик по кнопке/ползунку не должен забирать фокус у горячих клавиш
+addEventListener('pointerup', e => {
+  const t = e.target.closest?.('button, input[type=range], input[type=checkbox], .ui-dd');
+  if (t && !t.closest('.jd-modal')) setTimeout(() => { if (document.activeElement === t) t.blur(); }, 0);
+}, true);
+
 addEventListener('keydown', e => {
   if (e.key === ',' && e.ctrlKey) { e.preventDefault(); openSettings(); return; }
   if (screen !== 'studio') return;
-  const typing = e.target.closest?.('input, textarea, [contenteditable]') || document.querySelector('.jd-modal-back');
-  if (typing) return;
+  if (document.querySelector('.jd-modal-back')) return;
+  const t = e.target;
+  const textual = t.closest?.('textarea, select, [contenteditable]') ||
+    (t.tagName === 'INPUT' && !['range', 'checkbox', 'radio', 'button', 'color', 'file'].includes(t.type));
+  if (textual) return;
+  // стрелки у ползунка оставляем ему; пробел/Enter у кнопки не должен «нажимать» её повторно
+  if (t.type === 'range' && e.code.startsWith('Arrow')) return;
+  if (t.tagName === 'BUTTON' || t.tagName === 'INPUT') t.blur?.();
   const k = e.key;
   const ctrl = e.ctrlKey || e.metaKey;
   if (ctrl && (k === 'z' || k === 'я') && !e.shiftKey) { e.preventDefault(); sync.undo(); return; }
@@ -579,12 +621,19 @@ addEventListener('keydown', e => {
   if (ctrl && (k === 'e' || k === 'у')) { e.preventDefault(); openExport(); return; }
   if (ctrl) return;
   switch (e.code) {
-    case 'Space': e.preventDefault(); audio.recording() ? audio.stopRecording() : audio.toggle(); break;
+    case 'Space':
+      e.preventDefault();
+      if (audio.recording()) audio.stopRecording();
+      else if (e.shiftKey && audio.isPlaying()) audio.pause(); // Shift+Пробел — пауза на месте, без возврата
+      else audio.toggle();
+      break;
     case 'KeyR': e.preventDefault(); e.shiftKey ? recordCue() : toggleRecord(); break;
     case 'Delete': case 'Backspace': e.preventDefault(); deleteSelection(); break;
     case 'KeyS': e.preventDefault(); splitAtPlayhead(); break;
     case 'KeyM': e.preventDefault(); if (canEdit()) addMarker(audio.position()); break;
     case 'KeyL': e.preventDefault(); toggleLoop(); break;
+    case 'KeyP': e.preventDefault(); reviewLast(); break;
+    case 'KeyD': e.preventDefault(); cycleDuck(); break;
     case 'Home': e.preventDefault(); audio.seek(0); scrollToTime(0); break;
     case 'End': e.preventDefault(); { const t = audio.projectEnd(); audio.seek(t); scrollToTime(t); } break;
     case 'ArrowLeft': e.preventDefault(); audio.seek(audio.position() - (e.shiftKey ? 5 : 1)); break;
