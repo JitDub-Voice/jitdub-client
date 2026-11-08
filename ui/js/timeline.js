@@ -101,10 +101,20 @@ export function setPps(p, anchorTime = null) {
   pps = clamp(p, 4, 400);
   prefs.set('pps', pps);
   el.zoom.value = ppsToSlider(pps);
-  // якорь: под курсором/плейхедом остаётся то же время
-  const t = anchorTime ?? audio.position();
-  const vx = t * old - el.lanes.scrollLeft;
-  queue(() => { el.lanes.scrollLeft = Math.max(0, t * pps - vx); drawRuler(); });
+  // якорь: время под курсором мыши (колесо), иначе плейхед, если он на экране, иначе центр экрана —
+  // эта точка остаётся на месте. Ширину и прокрутку меняем сразу (синхронно), а не после отрисовки:
+  // иначе несколько шагов ползунка подряд считались от устаревшей прокрутки и вид «уезжал».
+  const L = el.lanes.scrollLeft, W = el.lanes.clientWidth;
+  let t = anchorTime;
+  if (t == null) {
+    const ph = audio.position();
+    t = ph * old >= L && ph * old <= L + W ? ph : (L + W / 2) / old;
+  }
+  const vx = t * old - L;
+  el.lanesInner.style.width = Math.max(W, audio.projectEnd() * pps + 600) + 'px';
+  el.lanes.scrollLeft = Math.max(0, t * pps - vx);
+  el.snapline.style.display = 'none';
+  queue();
 }
 
 function fitAll() {
@@ -153,6 +163,7 @@ export const refresh = () => queue();
 function render() {
   if (!doc.project) return;
   ensureArmed();
+  if (!drag) el.snapline.style.display = 'none'; // линия привязки живёт только во время перетаскивания
   const totalH = layout();
   const width = Math.max(el.lanes.clientWidth, audio.projectEnd() * pps + 600);
   el.lanesInner.style.width = width + 'px';
@@ -466,7 +477,7 @@ function onRulerDown(e) {
   }
   audio.seek(snapTime(t0, null, true));
   const move = ev => { const t = timeAtClient(ev.clientX); audio.seek(t); audio.scrub(t); };
-  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); };
+  const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); el.snapline.style.display = 'none'; };
   addEventListener('pointermove', move); addEventListener('pointerup', up);
 }
 
