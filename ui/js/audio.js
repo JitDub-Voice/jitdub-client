@@ -326,12 +326,12 @@ export function pause() {
   events.emit('transport');
 }
 
-// Стоп: пауза и (по настройке, по умолчанию да) возврат плейхеда туда, откуда начали играть — как в Audition
-export function stop() {
+// Стоп: пауза; возврат плейхеда к месту старта — по настройке (по умолчанию выключен) или явно (Shift+Пробел)
+export function stop({ returnToStart = prefs.get('returnOnStop', false) } = {}) {
   if (!T.playing) return;
   const back = T.returnPos;
   pause();
-  if (prefs.get('returnOnStop', true) && back != null) seek(back);
+  if (returnToStart && back != null) seek(back);
 }
 
 export function toggle() { T.playing ? stop() : play(); }
@@ -426,6 +426,36 @@ const rec = {
 };
 export const recording = () => (rec.active ? { trackId: rec.trackId, cueId: rec.cueId } : null);
 export const inputOpen = () => !!rec.stream;
+
+// Определение микрофонов: без разрешения Windows отдаёт устройства без названий — коротко открываем вход
+export async function detectInputs() {
+  const st = await navigator.mediaDevices.getUserMedia({ audio: true });
+  st.getTracks().forEach(t => t.stop());
+  return listInputs();
+}
+
+// подключили / отключили микрофон
+let knownInputs = null;
+async function onDeviceChange() {
+  const list = await listInputs();
+  const ids = new Set(list.map(d => d.deviceId));
+  if (knownInputs) {
+    const added = list.filter(d => d.deviceId && !knownInputs.has(d.deviceId) && d.deviceId !== 'default' && d.deviceId !== 'communications');
+    const removed = [...knownInputs].filter(id => !ids.has(id));
+    if (added.length) events.emit('notice', `Подключён микрофон: ${added.map(d => d.label || 'новое устройство').join(', ')}`);
+    const cur = prefs.get('inputDevice', '');
+    if (cur && removed.includes(cur)) {
+      prefs.set('inputDevice', '');
+      events.emit('notice', 'Выбранный микрофон отключён — переключаюсь на системный по умолчанию');
+      if (rec.stream && !rec.active) { closeInput(); openInput().catch(() => {}); }
+    } else if (removed.length && !list.length) events.emit('notice', 'Микрофонов не осталось');
+  }
+  knownInputs = ids;
+}
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', onDeviceChange);
+  onDeviceChange();
+}
 
 export async function listInputs() {
   try {

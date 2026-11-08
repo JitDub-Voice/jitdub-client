@@ -115,6 +115,9 @@ function renderHeader() {
   hdr.meter = h('div.meter.off', { 'data-tip': 'Уровень микрофона' }, h('i'));
   hdr.mic = h('button', { 'data-tip': 'Микрофон: включить вход (для индикатора и мониторинга)', onclick: toggleInput }, icon('mic'));
   hdr.loop = h('button', { 'data-tip': 'Повтор выбранных реплик (L)', onclick: toggleLoop }, icon('restart'));
+  hdr.ret = h('button', {
+    onclick: () => { prefs.set('returnOnStop', !prefs.get('returnOnStop', false)); updateHeader(); toast(prefs.get('returnOnStop', false) ? 'После стопа плейхед вернётся к месту старта' : 'Стоп оставляет плейхед на месте', 'info', 1800); },
+  }, icon('undo'));
   hdr.transport = h('div.transport', {},
     h('button', { 'data-tip': 'В начало (Home)', onclick: () => audio.seek(0) }, icon('toStart')),
     h('button', { 'data-tip': 'Предыдущая реплика (↑)', onclick: () => jumpCue(-1) }, icon('back')),
@@ -123,6 +126,7 @@ function renderHeader() {
     hdr.rec,
     h('button', { 'data-tip': 'Следующая реплика (↓)', onclick: () => jumpCue(1) }, icon('fwd')),
     hdr.loop,
+    hdr.ret,
     h('span.tsep'),
     hdr.time,
     h('span.tsep'),
@@ -148,6 +152,9 @@ function updateHeader() {
   hdr.mic.classList.toggle('on', audio.inputOpen());
   hdr.meter.classList.toggle('off', !audio.inputOpen());
   hdr.loop.classList.toggle('on', !!audio.loop());
+  const ret = prefs.get('returnOnStop', false);
+  hdr.ret.classList.toggle('on', ret);
+  hdr.ret.dataset.tip = ret ? 'Возврат после стопа: включён — плейхед вернётся к месту старта' : 'Возврат после стопа: выключен — плейхед остаётся на месте';
   hdr.conn.className = 'conn ' + doc.status;
   hdr.conn.dataset.tip = { online: 'В сети', connecting: 'Подключение…', offline: 'Нет соединения — переподключаюсь' }[doc.status];
   const name = hdr.project?.querySelector('span');
@@ -342,6 +349,7 @@ audio.events.on('record', r => { updateHeader(); if (!r) countdown(0); });
 audio.events.on('input', updateHeader);
 audio.events.on('meter', p => { if (hdr.meter) hdr.meter.firstChild.style.width = Math.min(100, Math.sqrt(p) * 100) + '%'; });
 audio.events.on('error', m => toast(m, 'err'));
+audio.events.on('notice', m => toast(m, 'info', 4000));
 
 // ---------- навигация по репликам, повтор ----------
 function jumpCue(dir) {
@@ -435,6 +443,12 @@ function applyProfile(user) {
 }
 
 // обрезка по центру до квадрата 256×256 и сжатие в WebP прямо в клиенте
+// анимированный WebP — в заголовке есть чанк ANIM
+async function isAnimatedWebp(file) {
+  const head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+  return new TextDecoder().decode(head).includes('ANIM');
+}
+
 async function squareImage(file, size = 256) {
   const bmp = await createImageBitmap(file);
   const side = Math.min(bmp.width, bmp.height);
@@ -449,7 +463,9 @@ async function squareImage(file, size = 256) {
 async function uploadAvatar(file) {
   if (!file.type.startsWith('image/')) { toast('Это не картинка', 'warn'); return; }
   try {
-    const blob = await squareImage(file);
+    const animated = file.type === 'image/gif' || (file.type === 'image/webp' && await isAnimatedWebp(file));
+    if (animated && file.size > 1024 * 1024) { toast('Анимированная аватарка — до 1 МБ', 'warn'); return; }
+    const blob = animated ? file : await squareImage(file);
     const { user } = await api('/api/me/avatar', { method: 'PUT', body: blob, headers: { 'content-type': blob.type || 'image/webp' } });
     applyProfile(user);
     toast('Аватарка обновлена', 'ok', 1500);
@@ -509,12 +525,29 @@ async function openInvites() {
 }
 
 async function openSettings() {
-  const inputs = await audio.listInputs();
-  const cur = prefs.get('inputDevice', '');
-  const devSel = dd(cur, [{ value: '', label: 'Системный по умолчанию' }, ...inputs.filter(d => d.deviceId && d.deviceId !== 'default').map(d => ({ value: d.deviceId, label: d.label || 'Микрофон' }))], v => {
-    prefs.set('inputDevice', v);
-    if (audio.inputOpen()) { audio.closeInput(); audio.openInput().catch(micError); }
-  }, { width: '100%' });
+  const micBox = h('div.col', { style: { gap: '6px', width: '100%' } });
+  const micMeter = h('div.meter', { style: { width: '100%' } }, h('i'));
+  const offMeter = audio.events.on('meter', p => { micMeter.firstChild.style.width = Math.min(100, Math.sqrt(p) * 100) + '%'; });
+  const renderMic = async (detect = false) => {
+    const inputs = detect ? await audio.detectInputs().catch(e => { micError(e); return []; }) : await audio.listInputs();
+    const cur = prefs.get('inputDevice', '');
+    const named = inputs.filter(d => d.deviceId && d.deviceId !== 'default' && d.deviceId !== 'communications');
+    const devSel = dd(named.some(d => d.deviceId === cur) ? cur : '', [{ value: '', label: 'Системный по умолчанию' }, ...named.map(d => ({ value: d.deviceId, label: d.label || 'Микрофон (нажмите «Определить»)' }))], v => {
+      prefs.set('inputDevice', v);
+      if (audio.inputOpen()) { audio.closeInput(); audio.openInput().catch(micError); }
+    }, { width: '100%' });
+    const noLabels = named.length && named.every(d => !d.label);
+    fill(micBox,
+      h('div.row', { style: { width: '100%' } }, devSel,
+        h('button.ui-btn.secondary.slim', { 'data-tip': 'Найти микрофоны (спросит разрешение у Windows)', onclick: () => renderMic(true) }, icon('refresh'), 'Определить')),
+      h('div.row', { style: { width: '100%' } },
+        h('button.ui-btn.secondary.slim', { onclick: async () => { if (audio.inputOpen()) audio.closeInput(); else await audio.openInput().catch(micError); renderMic(); } }, icon('mic'), audio.inputOpen() ? 'Остановить проверку' : 'Проверить'),
+        micMeter),
+      !inputs.length ? h('span', { style: { color: 'var(--p-red-8)', fontSize: '12px' } }, 'Микрофоны не найдены — подключите микрофон и нажмите «Определить»')
+        : noLabels ? h('span.dim', { style: { fontSize: '12px' } }, 'Названия микрофонов появятся после «Определить» (Windows спросит разрешение)')
+        : h('span.dim', { style: { fontSize: '12px' } }, `Найдено микрофонов: ${named.length}. Скажите что-нибудь при включённой проверке — полоска должна двигаться.`));
+  };
+  await renderMic();
   const num = (key, def, { min, max, step, suffix }) => {
     const i = h('input', { type: 'number', value: prefs.get(key, def), min, max, step, style: { width: '90px' } });
     i.addEventListener('change', () => prefs.set(key, clamp(+i.value || 0, min, max)));
@@ -536,7 +569,7 @@ async function openSettings() {
     fill(avaBox, drop, h('div.acts', {},
       h('button.ui-btn.secondary.slim', { onclick: pickAvatar }, icon('upload'), u?.avatar ? 'Сменить…' : 'Загрузить…'),
       u?.avatar ? h('button.ui-btn.secondary.slim', { onclick: async () => { await removeAvatar(); renderAva(); } }, icon('delete'), 'Убрать') : null,
-      h('span.dim', { style: { fontSize: '11px' } }, 'PNG, JPG, WebP или GIF — обрежется до квадрата')));
+      h('span.dim', { style: { fontSize: '11px' } }, 'PNG, JPG, WebP — обрежется до квадрата; GIF и анимированный WebP (до 1 МБ) будут двигаться')));
   };
   const pickAvatar = () => {
     const inp = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif' });
@@ -553,7 +586,7 @@ async function openSettings() {
       h('div.f', {}, h('label', {}, 'Имя'), nameIn),
       h('div.f', {}, h('label', {}, 'Аватарка'), avaBox),
       h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Запись'),
-      h('div.f', {}, h('label', {}, 'Микрофон'), devSel),
+      h('div.f.top', {}, h('label', {}, 'Микрофон'), micBox),
       h('div.f', {}, h('label', {}, 'Задержка входа'), num('inputLatencyMs', 20, { min: -500, max: 1000, step: 1, suffix: `мс + выход ${(lat * 1000).toFixed(0)} мс (авто)` })),
       h('div.hint', {}, 'Если голос в дублях опаздывает относительно видео — увеличьте, если спешит — уменьшите.'),
       h('div.f', {}, h('label', {}, 'Преролл реплики'), num('preroll', 2, { min: 0, max: 10, step: 0.5, suffix: 'с до начала реплики (обратный отсчёт)' })),
@@ -567,13 +600,14 @@ async function openSettings() {
       h('div.f', {}, h('label', {}, 'Приглушение (закадр)'), num('duckDb', -14, { min: -40, max: 0, step: 1, suffix: 'дБ' })),
       h('div.hint', {}, 'Закадр — оригинал тише, пока звучит голос дабера. Дубляж — из оригинала вырезается центр стерео (обычно там голоса), музыка и шумы остаются. Переключение — клавиша D.'),
       h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Интерфейс'),
-      h('div.f', {}, h('label', {}, ''), chk('returnOnStop', true, 'После стопа возвращать плейхед к месту старта')),
+      h('div.f', {}, h('label', {}, ''), chk('returnOnStop', false, 'После стопа возвращать плейхед к месту старта (кнопка ↶ в транспорте)', () => updateHeader())),
       h('div.f', {}, h('label', {}, ''), chk('scrubAudio', true, 'Звук под курсором при перетаскивании (скраб)')),
       h('div.f', {}, h('label', {}, ''), chk('showSubs', true, 'Показывать текст реплики поверх видео', () => refreshTimeline())),
       h('div.f', {}, h('label', {}, 'Скорость ленты ритмо'), num('rythmoSpeed', 160, { min: 40, max: 600, step: 10, suffix: 'пикс/с' })),
       h('div.t-def-sb', { style: { marginTop: '10px' } }, 'Сервер'),
       h('div.f', {}, h('label', {}, 'Адрес'), h('span.mono', {}, session.server)),
       h('div.hint', {}, 'Сменить сервер можно на экране входа (выйдите из аккаунта).')),
+    onClose: () => offMeter(),
     buttons: [{ label: 'Готово', primary: true, onClick: async close => {
       close();
       const displayName = nameIn.value.trim();
@@ -589,7 +623,7 @@ async function openSettings() {
 
 function showHotkeys() {
   const rows = [
-    ['Пробел', 'Играть / стоп с возвратом к месту старта (во время записи — стоп)'], ['Shift+Пробел', 'Пауза на месте, без возврата'], ['R', 'Запись на свою дорожку с плейхеда'], ['Shift+R', 'Записать выбранную реплику (преролл, автостоп)'],
+    ['Пробел', 'Играть / стоп (во время записи — стоп)'], ['Shift+Пробел', 'Стоп с возвратом к месту старта'], ['R', 'Запись на свою дорожку с плейхеда'], ['Shift+R', 'Записать выбранную реплику (преролл, автостоп)'],
     ['↑ / ↓', 'Предыдущая / следующая реплика'], ['← / →', 'Плейхед ±1 с (Shift — ±5 с)'], ['Home / End', 'В начало / в конец'],
     ['Enter', 'Прослушать выбранную реплику'], ['P', 'Прослушать последний / выбранный дубль'], ['D', 'Оригинал под озвучкой: закадр / дубляж / как есть'], ['L', 'Повтор выбранного'], ['S', 'Разрезать клип по плейхеду'], ['M', 'Маркер'],
     ['Delete', 'Удалить выбранное'], ['Ctrl+Z / Ctrl+Shift+Z', 'Отменить / повторить свои действия'], ['Ctrl+колесо, + / −', 'Масштаб таймлайна'],
@@ -626,7 +660,7 @@ addEventListener('keydown', e => {
     case 'Space':
       e.preventDefault();
       if (audio.recording()) audio.stopRecording();
-      else if (e.shiftKey && audio.isPlaying()) audio.pause(); // Shift+Пробел — пауза на месте, без возврата
+      else if (e.shiftKey && audio.isPlaying()) audio.stop({ returnToStart: true }); // Shift+Пробел — стоп с возвратом
       else audio.toggle();
       break;
     case 'KeyR': e.preventDefault(); e.shiftKey ? recordCue() : toggleRecord(); break;

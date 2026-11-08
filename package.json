@@ -1,6 +1,6 @@
 {
   "name": "jitdub-client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "JitDub — клиент совместной озвучки (Tauri v2 + WebAudio)",
   "type": "module",
   "private": true,
