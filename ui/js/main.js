@@ -464,7 +464,7 @@ async function uploadAvatar(file) {
   if (!file.type.startsWith('image/')) { toast('Это не картинка', 'warn'); return; }
   try {
     const animated = file.type === 'image/gif' || (file.type === 'image/webp' && await isAnimatedWebp(file));
-    if (animated && file.size > 1024 * 1024) { toast('Анимированная аватарка — до 1 МБ', 'warn'); return; }
+    if (animated && file.size > 10 * 1024 * 1024) { toast('Анимированная аватарка — до 10 МБ', 'warn'); return; }
     const blob = animated ? file : await squareImage(file);
     const { user } = await api('/api/me/avatar', { method: 'PUT', body: blob, headers: { 'content-type': blob.type || 'image/webp' } });
     applyProfile(user);
@@ -569,7 +569,7 @@ async function openSettings() {
     fill(avaBox, drop, h('div.acts', {},
       h('button.ui-btn.secondary.slim', { onclick: pickAvatar }, icon('upload'), u?.avatar ? 'Сменить…' : 'Загрузить…'),
       u?.avatar ? h('button.ui-btn.secondary.slim', { onclick: async () => { await removeAvatar(); renderAva(); } }, icon('delete'), 'Убрать') : null,
-      h('span.dim', { style: { fontSize: '11px' } }, 'PNG, JPG, WebP — обрежется до квадрата; GIF и анимированный WebP (до 1 МБ) будут двигаться')));
+      h('span.dim', { style: { fontSize: '11px' } }, 'PNG, JPG, WebP — обрежется до квадрата; GIF и анимированный WebP (до 10 МБ) будут двигаться')));
   };
   const pickAvatar = () => {
     const inp = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif' });
